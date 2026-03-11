@@ -1,0 +1,121 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'           # Triggers on any tag like v0.1.0, v1.2.3
+  workflow_dispatch:   # Allows manual trigger from GitHub Actions tab
+
+jobs:
+  # ── Build on all three platforms in parallel ────────────────────────────────
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+          - os: windows-latest
+            platform: win
+          - os: ubuntu-latest
+            platform: linux
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      # macOS: disable code signing for unsigned distribution
+      - name: Build (macOS)
+        if: matrix.platform == 'mac'
+        run: npm run build:mac
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Build (Windows)
+        if: matrix.platform == 'win'
+        run: npm run build:win
+
+      - name: Build (Linux)
+        if: matrix.platform == 'linux'
+        run: npm run build:linux
+
+      # Upload the built installer as a workflow artifact
+      - name: Upload artifact (macOS)
+        if: matrix.platform == 'mac'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-build
+          path: dist/*.dmg
+          if-no-files-found: error
+
+      - name: Upload artifact (Windows)
+        if: matrix.platform == 'win'
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-build
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: Upload artifact (Linux)
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+  # ── Create a GitHub Release and attach all three installers ─────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    # Only publish a release when triggered by a version tag
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: RDM Explorer ${{ github.ref_name }}
+          body: |
+            ## RDM Explorer ${{ github.ref_name }}
+
+            ### Download
+            | Platform | File |
+            |----------|------|
+            | macOS    | `.dmg` below |
+            | Windows  | `.exe` below |
+            | Linux    | `.AppImage` below |
+
+            ### Install
+            - **macOS** — Open the `.dmg`, drag RDM Explorer to Applications
+            - **Windows** — Run the `.exe` installer
+            - **Linux** — Make the `.AppImage` executable (`chmod +x`) and run it
+
+            ### Changes
+            _Add release notes here before publishing._
+          files: artifacts/**/*
+          draft: true       # Opens as a draft so you can review before publishing
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
