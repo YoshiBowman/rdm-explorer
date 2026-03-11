@@ -60,6 +60,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Update banner
   document.getElementById('updateDismiss').addEventListener('click', () => {
     document.getElementById('updateBanner').style.display = 'none'
+    document.body.classList.remove('has-update')
   })
 })
 
@@ -77,6 +78,7 @@ function showUpdateBanner(info) {
   link.href = info.url
   link.textContent = 'Download'
   document.getElementById('updateBanner').style.display = 'flex'
+  document.body.classList.add('has-update')
 }
 
 // ─── Scanning ─────────────────────────────────────────────────────────────────
