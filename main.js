@@ -146,12 +146,15 @@ ipcMain.handle('identify-device', async (_event, device, on) => {
 
 // ─── Update Checker ──────────────────────────────────────────────────────────
 
+const GITHUB_OWNER = 'YoshiBowman'
+const GITHUB_REPO  = 'rdm-explorer'
+
 ipcMain.handle('check-for-updates', () => checkForUpdates())
 
 function checkForUpdates() {
   const options = {
     hostname: 'api.github.com',
-    path:     `/repos/${PKG.build.publish.owner}/${PKG.build.publish.repo}/releases/latest`,
+    path:     `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`,
     headers:  { 'User-Agent': 'RDM-Explorer' },
     timeout:  8000,
   }
@@ -164,7 +167,7 @@ function checkForUpdates() {
         try {
           const release = JSON.parse(body)
           const latest  = (release.tag_name || '').replace(/^v/, '')
-          const current = PKG.version
+          const current = app.getVersion()
 
           if (latest && latest !== current && _isNewer(latest, current)) {
             const info = {
