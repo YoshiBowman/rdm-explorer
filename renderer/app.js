@@ -9,11 +9,12 @@
 // ─── State ────────────────────────────────────────────────────────────────────
 const State = {
   devices:    [],   // All discovered devices
-  nodes:      [],   // Discovered Art-Net nodes
+  nodes:      [],   // Discovered Art-Net / sACN nodes
   filtered:   [],   // Devices after filter/sort
   scanning:   false,
   activeDevice: null,
   isDemo:     false,
+  protocol:   'both',  // 'artnet', 'sacn', or 'both'
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
@@ -25,13 +26,23 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.rdm.onProgress(    (data)   => log(data.message, data.done ? 'done' : data.error ? 'err' : ''))
   window.rdm.onScanDone(    (data)   => scanFinished(data))
   window.rdm.onError(       (data)   => { log('Error: ' + data.message, 'err'); scanFinished(null, true) })
+  window.rdm.onUpdateAvailable((info) => showUpdateBanner(info))
 
-  // ── Wire up UI event listeners (no inline handlers needed) ───────────────
+  // ── Wire up UI event listeners ───────────────────────────────────────────
   document.getElementById('scanBtn').addEventListener('click', () => App.startScan())
   document.getElementById('demoBtn').addEventListener('click', () => App.loadDemo())
   document.getElementById('filterInput').addEventListener('input', () => App.applyFilter())
   document.getElementById('categoryFilter').addEventListener('change', () => App.applyFilter())
   document.getElementById('sortSelect').addEventListener('change', () => App.applyFilter())
+
+  // Protocol toggle
+  document.querySelectorAll('.proto-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.proto-btn').forEach(b => b.classList.remove('proto-active'))
+      btn.classList.add('proto-active')
+      State.protocol = btn.dataset.proto
+    })
+  })
 
   // Modal
   document.getElementById('modal').addEventListener('click', (e) => {
@@ -45,6 +56,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('applyLabelBtn').addEventListener('click', () => App.applyDeviceLabel())
   document.getElementById('identifyOnBtn').addEventListener('click', () => App.identifyOn())
   document.getElementById('identifyOffBtn').addEventListener('click', () => App.identifyOff())
+
+  // Update banner
+  document.getElementById('updateDismiss').addEventListener('click', () => {
+    document.getElementById('updateBanner').style.display = 'none'
+  })
 })
 
 // ─── Network Interfaces ───────────────────────────────────────────────────────
@@ -52,6 +68,15 @@ async function loadInterfaces() {
   const ifaces = await window.rdm.getNetworkInterfaces()
   const sel = document.getElementById('ifaceSelect')
   sel.innerHTML = ifaces.map(i => `<option value="${i.address}">${i.label}</option>`).join('')
+}
+
+// ─── Update Banner ──────────────────────────────────────────────────────────
+function showUpdateBanner(info) {
+  document.getElementById('updateText').textContent = `RDM Explorer v${info.version} is available!`
+  const link = document.getElementById('updateLink')
+  link.href = info.url
+  link.textContent = 'Download'
+  document.getElementById('updateBanner').style.display = 'flex'
 }
 
 // ─── Scanning ─────────────────────────────────────────────────────────────────
@@ -62,10 +87,10 @@ const App = {
     State.isDemo   = false
     clearAll()
     setScanningUI(true)
-    log('Starting scan…')
+    log(`Starting scan (${protocolLabel()})…`)
 
     const bindAddress = document.getElementById('ifaceSelect').value
-    await window.rdm.startScan(bindAddress)
+    await window.rdm.startScan(bindAddress, State.protocol)
   },
 
   loadDemo() {
@@ -177,6 +202,14 @@ const App = {
 }
 window.App = App
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function protocolLabel() {
+  if (State.protocol === 'artnet') return 'Art-Net'
+  if (State.protocol === 'sacn')   return 'sACN'
+  return 'Art-Net + sACN'
+}
+
 // ─── Scan lifecycle helpers ───────────────────────────────────────────────────
 function scanFinished(data, isError = false) {
   State.scanning = false
@@ -204,21 +237,28 @@ function setStatus(text, type) {
 
 // ─── Nodes ────────────────────────────────────────────────────────────────────
 function addNode(node) {
-  // Avoid duplicates
-  if (State.nodes.find(n => n.ip === node.ip)) return
+  // Avoid duplicates by ip
+  if (State.nodes.find(n => n.ip === node.ip && n.protocol === node.protocol)) return
   State.nodes.push(node)
 
   const list = document.getElementById('nodeList')
-  // Remove empty placeholder
   const empty = list.querySelector('.node-empty')
   if (empty) list.removeChild(empty)
+
+  const proto = node.protocol === 'sacn' ? 'sACN' : 'Art-Net'
+  const rdmTag = node.protocol === 'sacn'
+    ? '<div class="node-rdm node-sacn-tag">sACN</div>'
+    : `<div class="node-rdm">${node.supportsRDM ? '&#10003; RDM' : '&#9675; No RDM'}</div>`
 
   const li = document.createElement('li')
   li.className = 'node-item node-real'
   li.innerHTML = `
     <div class="node-name">${escHtml(node.shortName)}</div>
     <div class="node-ip">${escHtml(node.ip)}</div>
-    <div class="node-rdm">${node.supportsRDM ? '✓ RDM' : '○ No RDM'}</div>
+    <div class="node-proto-row">
+      <span class="node-proto-badge proto-badge-${node.protocol || 'artnet'}">${escHtml(proto)}</span>
+      ${rdmTag}
+    </div>
   `
   list.appendChild(li)
   document.getElementById('nodeCount').textContent = State.nodes.length
@@ -261,7 +301,6 @@ function renderGrid() {
     grid.style.display  = 'none'
     empty.style.display = State.devices.length === 0 ? 'flex' : 'none'
     if (State.devices.length > 0) {
-      // Devices exist but all filtered out — show a "no match" message
       empty.style.display = 'flex'
       empty.querySelector('.empty-title').textContent = 'No devices match the current filter'
       empty.querySelector('.empty-sub').textContent   = 'Try clearing the search or changing the category filter.'
@@ -282,6 +321,7 @@ function buildCard(device) {
   const foot  = device.dmxFootprint != null    ? String(device.dmxFootprint)    : '—'
   const pers  = device.personalityName         || (device.currentPersonality ? `Mode ${device.currentPersonality}` : '—')
   const cat   = device.productCategoryName     || 'Fixture'
+  const proto = device.protocol === 'sacn' ? 'sACN' : 'Art-Net'
 
   const catClass = categoryClass(cat)
 
@@ -290,7 +330,10 @@ function buildCard(device) {
   card.className = `device-card ${catClass}`
   card.addEventListener('click', () => App.openModal(device.uid))
   card.innerHTML = `
-    <div class="card-manufacturer">${escHtml(mfr)}</div>
+    <div class="card-top-row">
+      <div class="card-manufacturer">${escHtml(mfr)}</div>
+      <span class="card-proto-badge proto-badge-${device.protocol || 'artnet'}">${escHtml(proto)}</span>
+    </div>
     <div class="card-model">${escHtml(model)}</div>
     <div class="card-label">${escHtml(label)}</div>
     <div class="card-meta">
@@ -329,7 +372,6 @@ function populateModal(device) {
   document.getElementById('modalSubtitle').textContent = device.manufacturerLabel || ''
   document.getElementById('modalUid').textContent      = `UID: ${device.uid}`
 
-  // Info list
   const items = [
     ['DMX Start Address',  device.dmxStartAddress],
     ['DMX Footprint',      device.dmxFootprint],
@@ -344,6 +386,7 @@ function populateModal(device) {
     ['Sensors',            device.sensorCount],
     ['Node',               device.nodeName ? `${device.nodeName} (${device.nodeIP})` : device.nodeIP],
     ['Universe',           device.universe],
+    ['Protocol',           device.protocol === 'sacn' ? 'sACN (E1.31)' : 'Art-Net'],
   ]
 
   document.getElementById('modalInfoList').innerHTML = items
@@ -351,7 +394,6 @@ function populateModal(device) {
     .map(([k, v]) => `<dt>${escHtml(String(k))}</dt><dd>${escHtml(String(v))}</dd>`)
     .join('')
 
-  // Pre-fill editable fields
   document.getElementById('editAddress').value = device.dmxStartAddress || ''
   document.getElementById('editLabel').value   = device.deviceLabel || ''
 
@@ -403,31 +445,46 @@ function clearAll() {
 function loadDemoData() {
   log('Loading demo data…')
 
+  // ── Art-Net nodes ─────────────────────────────────────────────────────────
   const demoNodes = [
-    { ip: '192.168.1.101', shortName: 'Pathport Node A', longName: 'Pathway Pathport 8 — Stage Left', supportsRDM: true, universes: [{net:0,sub:0,uni:0},{net:0,sub:0,uni:1}] },
-    { ip: '192.168.1.102', shortName: 'Pathport Node B', longName: 'Pathway Pathport 8 — Stage Right', supportsRDM: true, universes: [{net:0,sub:0,uni:2}] },
+    { ip: '192.168.1.101', shortName: 'Pathport Node A', longName: 'Pathway Pathport 8 — Stage Left', supportsRDM: true, universes: [{net:0,sub:0,uni:0},{net:0,sub:0,uni:1}], protocol: 'artnet' },
+    { ip: '192.168.1.102', shortName: 'Pathport Node B', longName: 'Pathway Pathport 8 — Stage Right', supportsRDM: true, universes: [{net:0,sub:0,uni:2}], protocol: 'artnet' },
   ]
 
+  // ── sACN sources ──────────────────────────────────────────────────────────
+  const demoSACNNodes = [
+    { ip: '192.168.1.200', shortName: 'ETC Eos Ti', longName: 'ETC Eos Ti — Main Console', supportsRDM: false, universes: [{net:0,sub:0,uni:1},{net:0,sub:0,uni:2},{net:0,sub:0,uni:3},{net:0,sub:0,uni:4}], protocol: 'sacn', priority: 100 },
+    { ip: '192.168.1.201', shortName: 'ChamSys MQ500', longName: 'ChamSys MagicQ MQ500 — Backup', supportsRDM: false, universes: [{net:0,sub:0,uni:1},{net:0,sub:0,uni:2}], protocol: 'sacn', priority: 90 },
+    { ip: '192.168.1.150', shortName: 'ETC Response Mk2', longName: 'ETC Response Mk2 Gateway — Truss 1', supportsRDM: false, universes: [{net:0,sub:0,uni:1},{net:0,sub:0,uni:2},{net:0,sub:0,uni:5},{net:0,sub:0,uni:6}], protocol: 'sacn', priority: 100 },
+  ]
+
+  // ── RDM devices (discovered via Art-Net) ──────────────────────────────────
   const demoDevices = [
-    { uid: '0001:12AB3400', manufacturerLabel: 'Martin', deviceModelDescription: 'MAC Aura XB', deviceLabel: 'SR Wash 1', dmxStartAddress: 1,   dmxFootprint: 40, currentPersonality: 3, personalityName: 'Extended',       personalityCount: 4, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '1.4.2' },
-    { uid: '0001:12AB3401', manufacturerLabel: 'Martin', deviceModelDescription: 'MAC Aura XB', deviceLabel: 'SR Wash 2', dmxStartAddress: 41,  dmxFootprint: 40, currentPersonality: 3, personalityName: 'Extended',       personalityCount: 4, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '1.4.2' },
-    { uid: '0001:12AB3402', manufacturerLabel: 'Martin', deviceModelDescription: 'MAC Aura XB', deviceLabel: 'SL Wash 1', dmxStartAddress: 81,  dmxFootprint: 40, currentPersonality: 3, personalityName: 'Extended',       personalityCount: 4, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '1.4.2' },
-    { uid: '0001:12AB3403', manufacturerLabel: 'Martin', deviceModelDescription: 'MAC Aura XB', deviceLabel: 'SL Wash 2', dmxStartAddress: 121, dmxFootprint: 40, currentPersonality: 3, personalityName: 'Extended',       personalityCount: 4, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '1.4.2' },
-    { uid: '4752:00010001', manufacturerLabel: 'Robe',   deviceModelDescription: 'Robin 300E Spot',  deviceLabel: 'Spot 1',    dmxStartAddress: 161, dmxFootprint: 28, currentPersonality: 1, personalityName: 'Mode 1 (28ch)', personalityCount: 3, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '2.1.0' },
-    { uid: '4752:00010002', manufacturerLabel: 'Robe',   deviceModelDescription: 'Robin 300E Spot',  deviceLabel: 'Spot 2',    dmxStartAddress: 189, dmxFootprint: 28, currentPersonality: 1, personalityName: 'Mode 1 (28ch)', personalityCount: 3, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '2.1.0' },
-    { uid: '4752:00010003', manufacturerLabel: 'Robe',   deviceModelDescription: 'Robin 300E Spot',  deviceLabel: 'Spot 3',    dmxStartAddress: 217, dmxFootprint: 28, currentPersonality: 1, personalityName: 'Mode 1 (28ch)', personalityCount: 3, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '2.1.0' },
-    { uid: '1A7C:00000010', manufacturerLabel: 'Chauvet Professional', deviceModelDescription: 'Ovation E-910FC', deviceLabel: 'FOH L',  dmxStartAddress: 1,   dmxFootprint: 17, currentPersonality: 2, personalityName: '17ch RGBALC',  personalityCount: 4, productCategoryName: 'Fixture',               universe: '0.0.0.1', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '3.0.1' },
-    { uid: '1A7C:00000011', manufacturerLabel: 'Chauvet Professional', deviceModelDescription: 'Ovation E-910FC', deviceLabel: 'FOH R',  dmxStartAddress: 18,  dmxFootprint: 17, currentPersonality: 2, personalityName: '17ch RGBALC',  personalityCount: 4, productCategoryName: 'Fixture',               universe: '0.0.0.1', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '3.0.1' },
-    { uid: '6C74:00001001', manufacturerLabel: 'ETC',    deviceModelDescription: 'Source Four LED Series 3', deviceLabel: 'Key Light L', dmxStartAddress: 35,  dmxFootprint: 8,  currentPersonality: 1, personalityName: '8ch',          personalityCount: 2, productCategoryName: 'Fixture',               universe: '0.0.0.1', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '4.2.0' },
-    { uid: '6C74:00001002', manufacturerLabel: 'ETC',    deviceModelDescription: 'Source Four LED Series 3', deviceLabel: 'Key Light R', dmxStartAddress: 43,  dmxFootprint: 8,  currentPersonality: 1, personalityName: '8ch',          personalityCount: 2, productCategoryName: 'Fixture',               universe: '0.0.0.1', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '4.2.0' },
-    { uid: '4D41:00000001', manufacturerLabel: 'Martin', deviceModelDescription: 'RUSH Strobe 1 BMD', deviceLabel: 'Strobe DSR', dmxStartAddress: 1,   dmxFootprint: 5,  currentPersonality: 1, personalityName: '5ch',          personalityCount: 2, productCategoryName: 'Fixture',               universe: '0.0.2', nodeName: 'Pathport Node B', nodeIP: '192.168.1.102', softwareVersionLabel: '1.0.5' },
-    { uid: '4D41:00000002', manufacturerLabel: 'Martin', deviceModelDescription: 'RUSH Strobe 1 BMD', deviceLabel: 'Strobe DSL', dmxStartAddress: 6,   dmxFootprint: 5,  currentPersonality: 1, personalityName: '5ch',          personalityCount: 2, productCategoryName: 'Fixture',               universe: '0.0.2', nodeName: 'Pathport Node B', nodeIP: '192.168.1.102', softwareVersionLabel: '1.0.5' },
-    { uid: '414E:00000001', manufacturerLabel: 'Antari', deviceModelDescription: 'Z-1500 II',     deviceLabel: 'Hazer SR',  dmxStartAddress: 20,  dmxFootprint: 4,  currentPersonality: 1, personalityName: '4ch',          personalityCount: 1, productCategoryName: 'Atmospheric — Haze',    universe: '0.0.2', nodeName: 'Pathport Node B', nodeIP: '192.168.1.102', softwareVersionLabel: '2.0' },
+    { uid: '0001:12AB3400', manufacturerLabel: 'Martin', deviceModelDescription: 'MAC Aura XB', deviceLabel: 'SR Wash 1', dmxStartAddress: 1,   dmxFootprint: 40, currentPersonality: 3, personalityName: 'Extended',       personalityCount: 4, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '1.4.2', protocol: 'artnet' },
+    { uid: '0001:12AB3401', manufacturerLabel: 'Martin', deviceModelDescription: 'MAC Aura XB', deviceLabel: 'SR Wash 2', dmxStartAddress: 41,  dmxFootprint: 40, currentPersonality: 3, personalityName: 'Extended',       personalityCount: 4, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '1.4.2', protocol: 'artnet' },
+    { uid: '0001:12AB3402', manufacturerLabel: 'Martin', deviceModelDescription: 'MAC Aura XB', deviceLabel: 'SL Wash 1', dmxStartAddress: 81,  dmxFootprint: 40, currentPersonality: 3, personalityName: 'Extended',       personalityCount: 4, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '1.4.2', protocol: 'artnet' },
+    { uid: '0001:12AB3403', manufacturerLabel: 'Martin', deviceModelDescription: 'MAC Aura XB', deviceLabel: 'SL Wash 2', dmxStartAddress: 121, dmxFootprint: 40, currentPersonality: 3, personalityName: 'Extended',       personalityCount: 4, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '1.4.2', protocol: 'artnet' },
+    { uid: '4752:00010001', manufacturerLabel: 'Robe',   deviceModelDescription: 'Robin 300E Spot',  deviceLabel: 'Spot 1',    dmxStartAddress: 161, dmxFootprint: 28, currentPersonality: 1, personalityName: 'Mode 1 (28ch)', personalityCount: 3, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '2.1.0', protocol: 'artnet' },
+    { uid: '4752:00010002', manufacturerLabel: 'Robe',   deviceModelDescription: 'Robin 300E Spot',  deviceLabel: 'Spot 2',    dmxStartAddress: 189, dmxFootprint: 28, currentPersonality: 1, personalityName: 'Mode 1 (28ch)', personalityCount: 3, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '2.1.0', protocol: 'artnet' },
+    { uid: '4752:00010003', manufacturerLabel: 'Robe',   deviceModelDescription: 'Robin 300E Spot',  deviceLabel: 'Spot 3',    dmxStartAddress: 217, dmxFootprint: 28, currentPersonality: 1, personalityName: 'Mode 1 (28ch)', personalityCount: 3, productCategoryName: 'Fixture — Moving Yoke', universe: '0.0.0', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '2.1.0', protocol: 'artnet' },
+    { uid: '1A7C:00000010', manufacturerLabel: 'Chauvet Professional', deviceModelDescription: 'Ovation E-910FC', deviceLabel: 'FOH L',  dmxStartAddress: 1,   dmxFootprint: 17, currentPersonality: 2, personalityName: '17ch RGBALC',  personalityCount: 4, productCategoryName: 'Fixture',               universe: '0.0.1', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '3.0.1', protocol: 'artnet' },
+    { uid: '1A7C:00000011', manufacturerLabel: 'Chauvet Professional', deviceModelDescription: 'Ovation E-910FC', deviceLabel: 'FOH R',  dmxStartAddress: 18,  dmxFootprint: 17, currentPersonality: 2, personalityName: '17ch RGBALC',  personalityCount: 4, productCategoryName: 'Fixture',               universe: '0.0.1', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '3.0.1', protocol: 'artnet' },
+    { uid: '6C74:00001001', manufacturerLabel: 'ETC',    deviceModelDescription: 'Source Four LED Series 3', deviceLabel: 'Key Light L', dmxStartAddress: 35,  dmxFootprint: 8,  currentPersonality: 1, personalityName: '8ch',          personalityCount: 2, productCategoryName: 'Fixture',               universe: '0.0.1', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '4.2.0', protocol: 'artnet' },
+    { uid: '6C74:00001002', manufacturerLabel: 'ETC',    deviceModelDescription: 'Source Four LED Series 3', deviceLabel: 'Key Light R', dmxStartAddress: 43,  dmxFootprint: 8,  currentPersonality: 1, personalityName: '8ch',          personalityCount: 2, productCategoryName: 'Fixture',               universe: '0.0.1', nodeName: 'Pathport Node A', nodeIP: '192.168.1.101', softwareVersionLabel: '4.2.0', protocol: 'artnet' },
+    { uid: '4D41:00000001', manufacturerLabel: 'Martin', deviceModelDescription: 'RUSH Strobe 1 BMD', deviceLabel: 'Strobe DSR', dmxStartAddress: 1,   dmxFootprint: 5,  currentPersonality: 1, personalityName: '5ch',          personalityCount: 2, productCategoryName: 'Fixture',               universe: '0.0.2', nodeName: 'Pathport Node B', nodeIP: '192.168.1.102', softwareVersionLabel: '1.0.5', protocol: 'artnet' },
+    { uid: '4D41:00000002', manufacturerLabel: 'Martin', deviceModelDescription: 'RUSH Strobe 1 BMD', deviceLabel: 'Strobe DSL', dmxStartAddress: 6,   dmxFootprint: 5,  currentPersonality: 1, personalityName: '5ch',          personalityCount: 2, productCategoryName: 'Fixture',               universe: '0.0.2', nodeName: 'Pathport Node B', nodeIP: '192.168.1.102', softwareVersionLabel: '1.0.5', protocol: 'artnet' },
+    { uid: '414E:00000001', manufacturerLabel: 'Antari', deviceModelDescription: 'Z-1500 II',     deviceLabel: 'Hazer SR',  dmxStartAddress: 20,  dmxFootprint: 4,  currentPersonality: 1, personalityName: '4ch',          personalityCount: 1, productCategoryName: 'Atmospheric — Haze',    universe: '0.0.2', nodeName: 'Pathport Node B', nodeIP: '192.168.1.102', softwareVersionLabel: '2.0', protocol: 'artnet' },
   ]
 
+  // Add Art-Net nodes
   demoNodes.forEach(n => addNode(n))
-  log(`Found 2 Art-Net nodes.`)
+  log(`Found ${demoNodes.length} Art-Net nodes.`)
 
+  // Add sACN sources
+  demoSACNNodes.forEach(n => addNode(n))
+  log(`Found ${demoSACNNodes.length} sACN sources.`)
+
+  // Add RDM devices with staggered animation
   let i = 0
   function addNext() {
     if (i < demoDevices.length) {

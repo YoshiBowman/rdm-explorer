@@ -36,6 +36,39 @@ html, body {
   user-select: none;
 }
 
+/* ─── Update Banner ─────────────────────────────────────────────────────────── */
+.update-banner {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 32px;
+  background: linear-gradient(90deg, rgba(79,142,247,0.18), rgba(155,114,245,0.18));
+  border-bottom: 1px solid rgba(79,142,247,0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  font-size: 12.5px;
+  color: var(--text);
+  z-index: 200;
+}
+.update-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+.update-link:hover { text-decoration: underline; }
+.update-dismiss {
+  position: absolute;
+  right: 12px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+}
+.update-dismiss:hover { color: var(--text); }
+
 /* ─── Topbar ────────────────────────────────────────────────────────────────── */
 .topbar {
   position: fixed;
@@ -46,16 +79,20 @@ html, body {
   display: flex;
   align-items: center;
   padding: 0 16px;
+  padding-left: 78px;  /* Room for macOS traffic-light buttons */
   gap: 16px;
   z-index: 100;
   -webkit-app-region: drag;
-  padding-left: 78px;  /* Room for macOS traffic-light buttons */
 }
+/* When update banner is visible, push topbar down */
+body.has-update .topbar { top: 32px; }
+body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
+
 .topbar-left  { flex: 0 0 auto; }
 .topbar-center{ flex: 1 1 auto; display: flex; justify-content: center; }
 .topbar-right { flex: 0 0 auto; }
 
-.topbar button, .topbar select { -webkit-app-region: no-drag; }
+.topbar button, .topbar select, .topbar input { -webkit-app-region: no-drag; }
 
 .logo {
   display: flex;
@@ -75,6 +112,31 @@ html, body {
   gap: 8px;
 }
 
+/* ─── Protocol Toggle ───────────────────────────────────────────────────────── */
+.protocol-toggle {
+  display: flex;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.proto-btn {
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 500;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  -webkit-app-region: no-drag;
+}
+.proto-btn:hover { color: var(--text); background: var(--bg-card); }
+.proto-btn.proto-active {
+  background: var(--accent);
+  color: #fff;
+}
+
 .iface-select {
   background: var(--bg-input);
   border: 1px solid var(--border);
@@ -82,7 +144,7 @@ html, body {
   color: var(--text);
   padding: 6px 10px;
   font-size: 13px;
-  min-width: 240px;
+  min-width: 220px;
   outline: none;
   cursor: pointer;
 }
@@ -210,12 +272,42 @@ html, body {
 .node-item.node-real {
   background: var(--bg-card);
   border-color: var(--border);
-  cursor: pointer;
 }
 .node-item.node-real:hover { border-color: var(--border-h); background: var(--bg-card-h); }
 .node-name { font-weight: 500; color: var(--text); }
 .node-ip   { font-size: 11px; color: var(--text-muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
-.node-rdm  { font-size: 10px; color: var(--green); margin-top: 2px; }
+.node-rdm  { font-size: 10px; color: var(--green); }
+.node-sacn-tag { font-size: 10px; color: var(--cyan); }
+
+.node-proto-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+/* ─── Protocol Badges ───────────────────────────────────────────────────────── */
+.proto-badge-artnet,
+.proto-badge-sacn,
+.card-proto-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.proto-badge-artnet {
+  background: rgba(79,142,247,0.15);
+  color: var(--accent);
+  border: 1px solid rgba(79,142,247,0.3);
+}
+.proto-badge-sacn {
+  background: rgba(48,213,200,0.15);
+  color: var(--cyan);
+  border: 1px solid rgba(48,213,200,0.3);
+}
 
 /* Filters */
 .filter-input {
@@ -349,13 +441,18 @@ html, body {
 .cat-atmospheric::before { background: #70d9b8; }
 .cat-other::before       { background: var(--accent); }
 
+.card-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 3px;
+}
 .card-manufacturer {
   font-size: 10.5px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-muted);
-  margin-bottom: 3px;
 }
 .card-model {
   font-size: 14px;

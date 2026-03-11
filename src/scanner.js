@@ -1,6 +1,6 @@
 /**
  * scanner.js
- * Orchestrates Art-Net node discovery and RDM device enumeration.
+ * Orchestrates Art-Net node discovery, sACN source discovery, and RDM device enumeration.
  * Emits events: nodeFound, deviceFound, progress, error
  */
 
@@ -8,45 +8,77 @@
 
 const EventEmitter = require('events')
 const ArtNet = require('./artnet')
+const SACN   = require('./sacn')
 const RDM    = require('./rdm')
 
-const POLL_WAIT_MS   = 2500   // Wait after ArtPoll for replies
-const RDM_TIMEOUT_MS = 400    // Timeout waiting for a single RDM response
+const POLL_WAIT_MS       = 2500   // Wait after ArtPoll for replies
+const SACN_LISTEN_MS     = 3000   // Time to listen for sACN sources
+const RDM_TIMEOUT_MS     = 400    // Timeout waiting for a single RDM response
 const RDM_SET_TIMEOUT_MS = 600
 
 class Scanner extends EventEmitter {
   constructor() {
     super()
     this.artnet = new ArtNet()
-    this.nodes  = new Map()    // ip → node info
-    this._pendingCallback = null  // one active response callback at a time
+    this.sacn   = new SACN()
+    this.nodes  = new Map()        // ip → node info (Art-Net)
+    this.sacnSources = new Map()   // cid → source info (sACN)
+    this._pendingCallback = null
     this.running = false
   }
 
-  async start(bindAddress = '0.0.0.0') {
-    await this.artnet.start(bindAddress)
+  /**
+   * Start the scanner on the given bind address.
+   * @param {string}  bindAddress - Local IP to bind on
+   * @param {string}  protocol    - 'artnet', 'sacn', or 'both'
+   */
+  async start(bindAddress = '0.0.0.0', protocol = 'both') {
+    const startArtNet = protocol === 'artnet' || protocol === 'both'
+    const startSACN   = protocol === 'sacn'   || protocol === 'both'
 
-    this.artnet.on('artPollReply', (node) => {
-      if (node) {
-        const isNew = !this.nodes.has(node.ip)
-        this.nodes.set(node.ip, node)
-        if (isNew) this.emit('nodeFound', node)
+    if (startArtNet) {
+      await this.artnet.start(bindAddress)
+
+      this.artnet.on('artPollReply', (node) => {
+        if (node) {
+          node.protocol = 'artnet'
+          const isNew = !this.nodes.has(node.ip)
+          this.nodes.set(node.ip, node)
+          if (isNew) this.emit('nodeFound', node)
+        }
+      })
+
+      this.artnet.on('artRdmData', (data, rinfo) => {
+        if (this._pendingCallback) {
+          const cb = this._pendingCallback
+          this._pendingCallback = null
+          cb(data, rinfo)
+        }
+      })
+
+      this.artnet.on('error', (err) => this.emit('error', err))
+    }
+
+    if (startSACN) {
+      try {
+        await this.sacn.start(bindAddress)
+
+        this.sacn.on('sourceFound', (source) => {
+          this.sacnSources.set(source.cid, source)
+          this.emit('nodeFound', source)
+        })
+
+        this.sacn.on('error', (err) => this.emit('error', err))
+      } catch (err) {
+        // sACN may fail if port is in use — don't block the scan
+        this.emit('error', new Error(`sACN start failed: ${err.message}`))
       }
-    })
-
-    this.artnet.on('artRdmData', (data, rinfo) => {
-      if (this._pendingCallback) {
-        const cb = this._pendingCallback
-        this._pendingCallback = null
-        cb(data, rinfo)
-      }
-    })
-
-    this.artnet.on('error', (err) => this.emit('error', err))
+    }
   }
 
   stop() {
     this.artnet.stop()
+    this.sacn.stop()
     this.running = false
   }
 
@@ -55,19 +87,26 @@ class Scanner extends EventEmitter {
   async discoverNodes() {
     this.nodes.clear()
     this.artnet.sendArtPoll()
-    // Re-poll after a short gap to catch slower nodes
     await this._delay(800)
     this.artnet.sendArtPoll()
     await this._delay(POLL_WAIT_MS - 800)
     return Array.from(this.nodes.values())
   }
 
-  // ─── RDM Send / Receive ─────────────────────────────────────────────────────
+  // ─── sACN Source Discovery ────────────────────────────────────────────────────
 
   /**
-   * Send an RDM packet and wait for a response from the given node.
-   * Returns the raw RDM buffer, or null on timeout.
+   * Wait for sACN sources to appear on the network.
+   * sACN is passive — we just listen for multicast packets.
    */
+  async discoverSACNSources() {
+    this.sacnSources.clear()
+    await this._delay(SACN_LISTEN_MS)
+    return Array.from(this.sacnSources.values())
+  }
+
+  // ─── RDM Send / Receive ─────────────────────────────────────────────────────
+
   async _sendAndReceive(nodeIP, net, sub, uni, packet, timeout = RDM_TIMEOUT_MS) {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -80,7 +119,6 @@ class Scanner extends EventEmitter {
           clearTimeout(timer)
           resolve(data)
         } else {
-          // Not our node — put callback back and let the next packet hit it
           this._pendingCallback = (d2, r2) => {
             if (r2.address === nodeIP) { clearTimeout(timer); resolve(d2) }
           }
@@ -91,12 +129,11 @@ class Scanner extends EventEmitter {
     })
   }
 
-  // ─── RDM Discovery (Binary Tree) ────────────────────────────────────────────
+  // ─── RDM Discovery (Binary Tree) ──────────────────────────────────────────────
 
   async discoverRDMDevices(nodeIP, net, sub, uni) {
-    const found = new Map() // uid string → uid buffer
+    const found = new Map()
 
-    // Un-mute all devices first
     const unMuteAll = RDM.buildDiscUnMuteAll()
     await this._sendAndReceive(nodeIP, net, sub, uni, unMuteAll, 200)
     await this._delay(80)
@@ -109,29 +146,25 @@ class Scanner extends EventEmitter {
   }
 
   async _discoveryBranch(nodeIP, net, sub, uni, lower, upper, found, depth) {
-    if (depth > 50) return  // Hard cap to prevent runaway recursion
+    if (depth > 50) return
 
     const dub      = RDM.buildDiscUniqueBranch(lower, upper)
     const response = await this._sendAndReceive(nodeIP, net, sub, uni, dub, RDM_TIMEOUT_MS)
 
-    if (!response) return // No devices in this range
+    if (!response) return
 
-    // Attempt to decode as a discovery response
     const uid = RDM.parseDiscoveryResponse(response)
 
     if (uid) {
       const uidStr = RDM.uidToString(uid)
       if (!found.has(uidStr)) {
-        // Mute this device so it stays quiet while we find others
         const mute = RDM.buildDiscMute(uid)
         await this._sendAndReceive(nodeIP, net, sub, uni, mute, 300)
         found.set(uidStr, uid)
         this.emit('uidFound', { uidStr, nodeIP })
       }
-      // Continue searching the same range — more devices might be hiding
       await this._discoveryBranch(nodeIP, net, sub, uni, lower, upper, found, depth + 1)
     } else {
-      // Collision or garbled response — split the range and recurse both halves
       const mid = this._midUID(lower, upper)
       if (!mid) return
 
@@ -144,7 +177,7 @@ class Scanner extends EventEmitter {
     }
   }
 
-  // ─── RDM GET / SET ──────────────────────────────────────────────────────────
+  // ─── RDM GET / SET ────────────────────────────────────────────────────────────
 
   async getRDMParam(nodeIP, net, sub, uni, uid, pid, pd = null) {
     const uidBuf  = typeof uid === 'string' ? RDM.stringToUID(uid) : uid
@@ -162,40 +195,32 @@ class Scanner extends EventEmitter {
     return RDM.parsePacket(raw)
   }
 
-  // ─── Full Device Info ────────────────────────────────────────────────────────
+  // ─── Full Device Info ──────────────────────────────────────────────────────────
 
   async getDeviceInfo(nodeIP, net, sub, uni, uidStr, uidBuf) {
     const info = { uid: uidStr, nodeIP, net, sub, uni }
 
-    // DEVICE_INFO
     const diResp = await this.getRDMParam(nodeIP, net, sub, uni, uidBuf, RDM.PID.DEVICE_INFO)
-    if (diResp && diResp.pd) {
-      Object.assign(info, RDM.parseDeviceInfo(diResp.pd))
-    }
+    if (diResp && diResp.pd) Object.assign(info, RDM.parseDeviceInfo(diResp.pd))
 
-    // MANUFACTURER_LABEL
     const mfgResp = await this.getRDMParam(nodeIP, net, sub, uni, uidBuf, RDM.PID.MANUFACTURER_LABEL)
     if (mfgResp?.pd) info.manufacturerLabel = _parseStr(mfgResp.pd)
 
-    // DEVICE_MODEL_DESCRIPTION
     const modelResp = await this.getRDMParam(nodeIP, net, sub, uni, uidBuf, RDM.PID.DEVICE_MODEL_DESCRIPTION)
     if (modelResp?.pd) info.deviceModelDescription = _parseStr(modelResp.pd)
 
-    // DEVICE_LABEL
     const labelResp = await this.getRDMParam(nodeIP, net, sub, uni, uidBuf, RDM.PID.DEVICE_LABEL)
     if (labelResp?.pd) info.deviceLabel = _parseStr(labelResp.pd)
 
-    // SOFTWARE_VERSION_LABEL
     const swResp = await this.getRDMParam(nodeIP, net, sub, uni, uidBuf, RDM.PID.SOFTWARE_VERSION_LABEL)
     if (swResp?.pd) info.softwareVersionLabel = _parseStr(swResp.pd)
 
-    // DMX_PERSONALITY_DESCRIPTION for the current personality
     if (info.currentPersonality > 0) {
       const pPD = Buffer.alloc(1)
       pPD[0] = info.currentPersonality
       const persResp = await this.getRDMParam(nodeIP, net, sub, uni, uidBuf, RDM.PID.DMX_PERSONALITY_DESCRIPTION, pPD)
       if (persResp?.pd && persResp.pd.length >= 3) {
-        info.personalityName     = _parseStr(persResp.pd.slice(2))
+        info.personalityName      = _parseStr(persResp.pd.slice(2))
         info.personalityFootprint = persResp.pd.readUInt16BE(0)
       }
     }
@@ -203,7 +228,7 @@ class Scanner extends EventEmitter {
     return info
   }
 
-  // ─── Convenience Actions ────────────────────────────────────────────────────
+  // ─── Convenience Actions ──────────────────────────────────────────────────────
 
   async setDmxAddress(device, newAddress) {
     const { nodeIP, net, sub, uni, uid } = device
@@ -225,77 +250,106 @@ class Scanner extends EventEmitter {
     return this.setRDMParam(nodeIP, net, sub, uni, uid, RDM.PID.IDENTIFY_DEVICE, pd)
   }
 
-  // ─── Full Scan Workflow ─────────────────────────────────────────────────────
+  // ─── Full Scan Workflow ───────────────────────────────────────────────────────
 
-  async fullScan(bindAddress, onProgress) {
+  /**
+   * @param {string} bindAddress
+   * @param {Function|null} onProgress
+   * @param {string} protocol - 'artnet', 'sacn', or 'both'
+   */
+  async fullScan(bindAddress, onProgress, protocol = 'both') {
     this.running = true
+    const scanArtNet = protocol === 'artnet' || protocol === 'both'
+    const scanSACN   = protocol === 'sacn'   || protocol === 'both'
+
     const report = (msg, extra = {}) => {
       this.emit('progress', { message: msg, ...extra })
       if (onProgress) onProgress({ message: msg, ...extra })
     }
 
     try {
-      report('Searching for Art-Net nodes on the network…')
-      const nodes = await this.discoverNodes()
-
-      if (nodes.length === 0) {
-        report('No Art-Net nodes found. Check network connection and node power.')
-        return []
-      }
-
-      report(`Found ${nodes.length} node(s). Starting RDM discovery…`, { nodes })
-
       const allDevices = []
 
-      for (const node of nodes) {
-        report(`Scanning node: ${node.shortName} (${node.ip})`)
+      // ── Art-Net Discovery ──────────────────────────────────────────────────
+      if (scanArtNet) {
+        report('Searching for Art-Net nodes on the network…')
+        const nodes = await this.discoverNodes()
 
-        if (!node.supportsRDM) {
-          report(`  ${node.shortName} does not appear to support RDM — skipping RDM scan.`)
-        }
+        if (nodes.length === 0) {
+          report('No Art-Net nodes found.')
+        } else {
+          report(`Found ${nodes.length} Art-Net node(s). Starting RDM discovery…`, { nodes })
 
-        const universesToScan = node.universes.length > 0
-          ? node.universes
-          : [{ net: 0, sub: 0, uni: 0 }]
+          for (const node of nodes) {
+            report(`Scanning node: ${node.shortName} (${node.ip})`)
 
-        for (const uniInfo of universesToScan) {
-          const uniLabel = `${uniInfo.net}.${uniInfo.sub}.${uniInfo.uni}`
-          report(`  Discovering RDM devices on universe ${uniLabel}…`)
+            if (!node.supportsRDM) {
+              report(`  ${node.shortName} does not appear to support RDM — skipping.`)
+            }
 
-          let uids = []
-          try {
-            uids = await this.discoverRDMDevices(node.ip, uniInfo.net, uniInfo.sub, uniInfo.uni)
-          } catch (e) {
-            report(`  Error on universe ${uniLabel}: ${e.message}`)
-            continue
-          }
+            const universesToScan = node.universes.length > 0
+              ? node.universes
+              : [{ net: 0, sub: 0, uni: 0 }]
 
-          if (uids.length === 0) {
-            report(`  No RDM devices found on universe ${uniLabel}.`)
-            continue
-          }
+            for (const uniInfo of universesToScan) {
+              const uniLabel = `${uniInfo.net}.${uniInfo.sub}.${uniInfo.uni}`
+              report(`  Discovering RDM devices on universe ${uniLabel}…`)
 
-          report(`  Found ${uids.length} RDM UID(s) on universe ${uniLabel}. Reading device info…`)
+              let uids = []
+              try {
+                uids = await this.discoverRDMDevices(node.ip, uniInfo.net, uniInfo.sub, uniInfo.uni)
+              } catch (e) {
+                report(`  Error on universe ${uniLabel}: ${e.message}`)
+                continue
+              }
 
-          for (const { uidStr, uidBuf } of uids) {
-            report(`    Reading: ${uidStr}`)
-            try {
-              const deviceInfo = await this.getDeviceInfo(
-                node.ip, uniInfo.net, uniInfo.sub, uniInfo.uni, uidStr, uidBuf
-              )
-              deviceInfo.universe    = uniLabel
-              deviceInfo.nodeName    = node.shortName
-              deviceInfo.nodeIP      = node.ip
-              allDevices.push(deviceInfo)
-              this.emit('deviceFound', deviceInfo)
-            } catch (e) {
-              report(`    Error reading ${uidStr}: ${e.message}`)
+              if (uids.length === 0) {
+                report(`  No RDM devices found on universe ${uniLabel}.`)
+                continue
+              }
+
+              report(`  Found ${uids.length} RDM UID(s) on universe ${uniLabel}. Reading device info…`)
+
+              for (const { uidStr, uidBuf } of uids) {
+                report(`    Reading: ${uidStr}`)
+                try {
+                  const deviceInfo = await this.getDeviceInfo(
+                    node.ip, uniInfo.net, uniInfo.sub, uniInfo.uni, uidStr, uidBuf
+                  )
+                  deviceInfo.universe  = uniLabel
+                  deviceInfo.nodeName  = node.shortName
+                  deviceInfo.nodeIP    = node.ip
+                  deviceInfo.protocol  = 'artnet'
+                  allDevices.push(deviceInfo)
+                  this.emit('deviceFound', deviceInfo)
+                } catch (e) {
+                  report(`    Error reading ${uidStr}: ${e.message}`)
+                }
+              }
             }
           }
         }
       }
 
-      report(`Scan complete — ${allDevices.length} device(s) found.`, { done: true })
+      // ── sACN Discovery ─────────────────────────────────────────────────────
+      if (scanSACN) {
+        report('Listening for sACN sources on the network…')
+        const sources = await this.discoverSACNSources()
+
+        if (sources.length === 0) {
+          report('No sACN sources found.')
+        } else {
+          report(`Found ${sources.length} sACN source(s).`)
+          for (const src of sources) {
+            const uniList = src.universes.map(u => u.universe || u.uni).join(', ')
+            report(`  ${src.shortName} (${src.ip}) — universes: ${uniList}`)
+          }
+        }
+      }
+
+      const totalNodes = (scanArtNet ? this.nodes.size : 0) +
+                         (scanSACN ? this.sacnSources.size : 0)
+      report(`Scan complete — ${totalNodes} node(s), ${allDevices.length} RDM device(s) found.`, { done: true })
       return allDevices
 
     } finally {
@@ -303,7 +357,7 @@ class Scanner extends EventEmitter {
     }
   }
 
-  // ─── UID Math ────────────────────────────────────────────────────────────────
+  // ─── UID Math ──────────────────────────────────────────────────────────────────
 
   _midUID(lower, upper) {
     const lo = BigInt('0x' + lower.toString('hex'))

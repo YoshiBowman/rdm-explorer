@@ -10,6 +10,13 @@
 </head>
 <body>
 
+  <!-- ── Update Banner ─────────────────────────────────────────────────────── -->
+  <div id="updateBanner" class="update-banner" style="display:none">
+    <span id="updateText">A new version is available!</span>
+    <a id="updateLink" class="update-link" href="#" target="_blank">Download</a>
+    <button id="updateDismiss" class="update-dismiss">✕</button>
+  </div>
+
   <!-- ── Top Bar ──────────────────────────────────────────────────────────── -->
   <header class="topbar">
     <div class="topbar-left">
@@ -22,6 +29,13 @@
 
     <div class="topbar-center">
       <div class="scan-controls">
+        <!-- Protocol Toggle -->
+        <div class="protocol-toggle">
+          <button id="protoArtnet" class="proto-btn" data-proto="artnet">Art-Net</button>
+          <button id="protoBoth" class="proto-btn proto-active" data-proto="both">Both</button>
+          <button id="protoSacn" class="proto-btn" data-proto="sacn">sACN</button>
+        </div>
+
         <select id="ifaceSelect" class="iface-select" title="Network interface to scan on">
           <option value="0.0.0.0">Loading interfaces…</option>
         </select>

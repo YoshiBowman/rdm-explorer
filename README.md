@@ -1,69 +1,102 @@
 # RDM Explorer
 
-Discover, inspect, and control RDM-enabled lighting fixtures on Art-Net networks.
-Runs as a cross-platform desktop app on Windows, macOS, and Linux.
+Discover, inspect, and control RDM-enabled lighting fixtures on Art-Net and sACN networks. Runs as a desktop app on macOS, Windows, and Linux.
 
 ---
 
-## What it does
+## Features
 
-- Broadcasts ArtPoll to find Art-Net nodes (including Pathway Pathport)
-- Runs RDM discovery (DISC_UNIQUE_BRANCH binary tree) through those nodes
-- Reads fixture info: manufacturer, model, DMX address, personality, footprint, software version
-- Lets you set DMX start address, device label, and trigger identify from the UI
-- Includes a **Demo mode** so you can explore the interface without any hardware
-
----
-
-## Requirements
-
-- [Node.js](https://nodejs.org) v18 or later
-- npm (included with Node.js)
-- An Art-Net network with RDM-capable nodes (Pathway Pathport, etc.)
-- The computer running RDM Explorer must be on the same subnet as the Art-Net nodes
+- **Dual protocol scanning** — discovers Art-Net nodes and sACN sources simultaneously
+- **Protocol toggle** — scan Art-Net only, sACN only, or both at once
+- **RDM device discovery** — binary-tree RDM enumeration over Art-Net (Art-RDM)
+- **Device details** — manufacturer, model, DMX address, footprint, personality, software version
+- **Live control** — set DMX start address, device label, and trigger identify
+- **Filter & sort** — search by name, UID, address, or category
+- **Demo mode** — explore the UI with realistic fixture data, no hardware needed
+- **Auto update check** — notifies you when a new release is available
 
 ---
 
-## Quick start (run from source)
+## Installation (macOS DMG)
+
+1. Go to the [Releases page](https://github.com/YoshiBowman/rdm-explorer/releases)
+2. Download `RDM Explorer-x.x.x-arm64.dmg` (Apple Silicon) or the x64 build for Intel Macs
+3. Open the DMG and drag **RDM Explorer** to your Applications folder
+
+### "App is Damaged" Warning
+
+Because RDM Explorer is not yet signed with an Apple Developer certificate, macOS will block it on first launch. To fix this, open Terminal and run:
 
 ```bash
-# 1. Install dependencies
+sudo xattr -rd com.apple.quarantine "/Applications/RDM Explorer.app"
+```
+
+Then open the app normally. If that still doesn't work, temporarily disable Gatekeeper:
+
+```bash
+sudo spctl --master-disable
+```
+
+Re-enable Gatekeeper after testing:
+
+```bash
+sudo spctl --master-enable
+```
+
+---
+
+## Building from Source
+
+### Prerequisites
+
+- [Node.js](https://nodejs.org) v18 or later (includes npm)
+- Xcode Command Line Tools — `xcode-select --install`
+- Or install both via [Homebrew](https://brew.sh): `brew install node`
+
+### Steps
+
+```bash
+git clone https://github.com/YoshiBowman/rdm-explorer.git
+cd rdm-explorer
 npm install
-
-# 2. Launch the app
-npm start
+npm start             # Run in development mode
+npm run build:mac     # Build macOS DMG → dist/
+npm run build:win     # Build Windows installer → dist/
+npm run build:linux   # Build Linux AppImage → dist/
 ```
-
-On first launch, select the network interface connected to your Art-Net network from the dropdown, then click **Scan Network**.
-
-No hardware? Click **Demo** to load sample fixtures and explore the UI.
 
 ---
 
-## Building a distributable installer
+## Network Requirements
 
-```bash
-# Build for your current platform
-npm run build
-
-# Build for a specific platform (run on that platform, or use CI)
-npm run build:win      # Windows NSIS installer → dist/
-npm run build:mac      # macOS .dmg → dist/
-npm run build:linux    # Linux AppImage → dist/
-```
-
-Installers appear in the `dist/` folder. The Windows build produces a standard setup wizard; the macOS build produces a .dmg; Linux produces an AppImage that runs without installation.
+- Art-Net: UDP port **6454** must be open (broadcast)
+- sACN: UDP port **5568** must be open (multicast)
+- Your computer must be on the same network subnet as your nodes
+- RDM control requires an Art-Net gateway that supports Art-RDM (most Pathport, Luminex, and ETC gateways do)
 
 ---
 
-## Project structure
+## Protocol Support
+
+| Protocol | Discovery | RDM Control |
+|----------|-----------|-------------|
+| Art-Net (ArtPoll / Art-RDM) | ✓ | ✓ |
+| sACN E1.31 (source detection) | ✓ | — |
+| sACN E1.33 / RDMnet | Planned | Planned |
+
+sACN sources are discovered passively via multicast listening. RDM control currently requires an Art-Net gateway. Full E1.33 RDMnet (RDM directly over sACN) is planned for a future release.
+
+---
+
+## Project Structure
 
 ```
 rdm-explorer/
-├── main.js          Electron main process — window, IPC handlers
+├── main.js          Electron main process — window, IPC, update checker
 ├── preload.js       Sandboxed bridge between main and renderer
 ├── src/
-│   ├── artnet.js    Art-Net protocol (ArtPoll, ArtRdm)
+│   ├── artnet.js    Art-Net protocol (ArtPoll, Art-RDM)
+│   ├── sacn.js      sACN E1.31 protocol (source & universe discovery)
 │   ├── rdm.js       RDM protocol (packet building, parsing, PIDs)
 │   └── scanner.js   Discovery coordinator (nodes → UIDs → device info)
 └── renderer/
@@ -74,33 +107,27 @@ rdm-explorer/
 
 ---
 
-## How it works
+## How It Works
 
-1. **Node discovery** — ArtPoll is broadcast on UDP port 6454. Art-Net nodes reply with their IP, name, and universe configuration.
-2. **RDM discovery** — For each node, Art-RDM packets are sent using the binary tree (DISC_UNIQUE_BRANCH) algorithm to enumerate all device UIDs.
-3. **Device info** — For each UID, RDM GET requests fetch DEVICE_INFO, MANUFACTURER_LABEL, DEVICE_MODEL_DESCRIPTION, DEVICE_LABEL, SOFTWARE_VERSION_LABEL, and DMX_PERSONALITY_DESCRIPTION.
-4. **Control** — SET commands handle DMX start address changes, device labels, and identify.
+1. **Art-Net node discovery** — ArtPoll is broadcast on UDP 6454. Nodes reply with their IP, name, and universe configuration.
+2. **sACN source discovery** — The app joins E1.31 multicast groups and listens for Universe Discovery packets and data frames to detect active sources.
+3. **RDM discovery** — For each Art-Net node, Art-RDM packets run the binary tree (DISC_UNIQUE_BRANCH) algorithm to enumerate all device UIDs.
+4. **Device info** — For each UID, RDM GET requests fetch manufacturer, model, DMX address, personality, footprint, and software version.
+5. **Control** — RDM SET commands handle DMX start address changes, device labels, and identify.
 
 The source UID used by this controller is `7FF0:00000001` (prototype manufacturer range).
 
 ---
 
-## Compatibility
-
-Tested with Pathway Pathport nodes. Should work with any Art-Net node that supports Art-RDM (OpCode 0x8002) and acts as an RDM proxy. sACN sources are visible on the network but RDM is an Art-Net feature and requires Art-Net nodes.
-
----
-
 ## Roadmap
 
+- [ ] Full E1.33 RDMnet support (RDM directly over sACN)
 - [ ] Sensor readback (temperature, voltage, etc.)
 - [ ] Lamp hours and power cycle counters
-- [ ] Pan/tilt invert controls
 - [ ] Personality switching
+- [ ] Pan/tilt invert controls
 - [ ] Export device list to CSV / PDF
-- [ ] sACN source browser (non-RDM)
 - [ ] Auto-rescan on network change
-- [ ] Dark / light theme toggle
 
 ---
 

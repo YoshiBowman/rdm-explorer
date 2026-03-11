@@ -1,15 +1,18 @@
 /**
  * main.js
  * Electron main process.
- * Creates the browser window, handles IPC, and drives the Scanner.
+ * Creates the browser window, handles IPC, drives the Scanner, and checks for updates.
  */
 
 'use strict'
 
 const { app, BrowserWindow, ipcMain } = require('electron')
-const path = require('path')
-const os   = require('os')
+const path  = require('path')
+const os    = require('os')
+const https = require('https')
 const Scanner = require('./src/scanner')
+
+const PKG = require('./package.json')
 
 let mainWindow = null
 let scanner    = null
@@ -29,12 +32,16 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration:  false,
     },
-    show: false, // show after ready-to-show
+    show: false,
   })
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'))
 
-  mainWindow.once('ready-to-show', () => mainWindow.show())
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show()
+    // Check for updates a few seconds after launch
+    setTimeout(checkForUpdates, 4000)
+  })
 
   mainWindow.on('closed', () => {
     mainWindow = null
@@ -78,7 +85,7 @@ ipcMain.handle('get-network-interfaces', () => {
 
 // ─── Scan ─────────────────────────────────────────────────────────────────────
 
-ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0') => {
+ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0', protocol = 'both') => {
   // Clean up any existing scanner
   if (scanner) { scanner.stop(); scanner = null }
 
@@ -90,8 +97,8 @@ ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0') => {
   scanner.on('error',      (err)    => send('scan-error',     { message: err.message }))
 
   try {
-    await scanner.start(bindAddress)
-    const devices = await scanner.fullScan(bindAddress, null)
+    await scanner.start(bindAddress, protocol)
+    const devices = await scanner.fullScan(bindAddress, null, protocol)
     send('scan-done', { deviceCount: devices.length })
     return { ok: true, deviceCount: devices.length }
   } catch (err) {
@@ -136,3 +143,60 @@ ipcMain.handle('identify-device', async (_event, device, on) => {
     return { ok: false, error: e.message }
   }
 })
+
+// ─── Update Checker ──────────────────────────────────────────────────────────
+
+ipcMain.handle('check-for-updates', () => checkForUpdates())
+
+function checkForUpdates() {
+  const options = {
+    hostname: 'api.github.com',
+    path:     `/repos/${PKG.build.publish.owner}/${PKG.build.publish.repo}/releases/latest`,
+    headers:  { 'User-Agent': 'RDM-Explorer' },
+    timeout:  8000,
+  }
+
+  return new Promise((resolve) => {
+    const req = https.get(options, (res) => {
+      let body = ''
+      res.on('data', (chunk) => body += chunk)
+      res.on('end', () => {
+        try {
+          const release = JSON.parse(body)
+          const latest  = (release.tag_name || '').replace(/^v/, '')
+          const current = PKG.version
+
+          if (latest && latest !== current && _isNewer(latest, current)) {
+            const info = {
+              version:  latest,
+              url:      release.html_url,
+              notes:    release.body || '',
+            }
+            send('update-available', info)
+            resolve(info)
+          } else {
+            resolve(null)
+          }
+        } catch (_) {
+          resolve(null)
+        }
+      })
+    })
+
+    req.on('error', () => resolve(null))
+    req.on('timeout', () => { req.destroy(); resolve(null) })
+  })
+}
+
+/**
+ * Simple semver comparison: returns true if `a` is newer than `b`.
+ */
+function _isNewer(a, b) {
+  const pa = a.split('.').map(Number)
+  const pb = b.split('.').map(Number)
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return true
+    if ((pa[i] || 0) < (pb[i] || 0)) return false
+  }
+  return false
+}
