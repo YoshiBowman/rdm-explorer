@@ -300,8 +300,12 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
+.sidebar::-webkit-scrollbar { width: 4px; }
+.sidebar::-webkit-scrollbar-track { background: transparent; }
+.sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
 .sidebar-section {
   padding: 14px 14px 10px;
@@ -337,6 +341,9 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
   display: flex;
   flex-direction: column;
   gap: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .node-item {
   padding: 7px 10px;
