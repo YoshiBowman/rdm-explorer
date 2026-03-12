@@ -52,6 +52,22 @@ function createWindow() {
 
 app.whenReady().then(createWindow)
 
+// ─── Crash safety ─────────────────────────────────────────────────────────────
+// Catch anything that escapes try/catch blocks so it shows up in the scan log
+// instead of silently killing the app.
+
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err)
+  send('scan-error', { message: `Crash: ${err.message}\n${err.stack || ''}` })
+})
+
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason)
+  const stack = reason instanceof Error ? (reason.stack || '') : ''
+  console.error('[unhandledRejection]', reason)
+  send('scan-error', { message: `Unhandled rejection: ${msg}\n${stack}` })
+})
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
@@ -66,6 +82,25 @@ function send(channel, data) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, data)
   }
+}
+
+/**
+ * Strip any Buffer / non-serializable values from an object before sending
+ * over Electron IPC. Electron uses structured clone which rejects Buffers.
+ */
+function sanitize(obj) {
+  if (obj === null || obj === undefined) return obj
+  if (Buffer.isBuffer(obj)) return `<Buffer ${obj.length}b>`
+  if (Array.isArray(obj)) return obj.map(sanitize)
+  if (typeof obj === 'object') {
+    const out = {}
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === 'function') continue
+      out[k] = sanitize(v)
+    }
+    return out
+  }
+  return obj
 }
 
 // ─── Network Interfaces ───────────────────────────────────────────────────────
@@ -134,9 +169,9 @@ ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0', protocol = 
 
   scanner = new Scanner()
 
-  scanner.on('nodeFound',  (node)   => send('node-found',     node))
-  scanner.on('deviceFound',(device) => send('device-found',   device))
-  scanner.on('progress',   (data)   => send('scan-progress',  data))
+  scanner.on('nodeFound',  (node)   => send('node-found',     sanitize(node)))
+  scanner.on('deviceFound',(device) => send('device-found',   sanitize(device)))
+  scanner.on('progress',   (data)   => send('scan-progress',  sanitize(data)))
   scanner.on('error',      (err)    => send('scan-error',     { message: err.message }))
 
   try {
