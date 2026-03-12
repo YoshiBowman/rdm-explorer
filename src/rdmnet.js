@@ -170,6 +170,7 @@ function buildLLRPProbeRequest(cid) {
  * Returns an object describing the packet, or null if unrecognised.
  */
 function parseACNPacket(buf) {
+  try {
   // Must have at least the preamble (16 bytes)
   if (buf.length < 16) return null
 
@@ -178,7 +179,8 @@ function parseACNPacket(buf) {
   if (!pid.equals(ACN_PID)) return null
 
   // Root PDU starts at offset 16
-  if (buf.length < 18) return null
+  // Need at least 22 bytes: 16 preamble + 2 flags/len + 4 vector
+  if (buf.length < 22) return null
   const rootLen   = ((buf[16] & 0x0F) << 8) | buf[17]
   if (buf.length < 16 + rootLen) return null
 
@@ -217,6 +219,7 @@ function parseACNPacket(buf) {
   }
 
   return result
+  } catch (_) { return null }
 }
 
 // ─── TCP frame handling ───────────────────────────────────────────────────────
@@ -226,30 +229,34 @@ function parseACNPacket(buf) {
  * Returns array of parsed packets; any remainder stays in the accumulator.
  */
 function parseTCPStream(buf) {
-  const packets = []
-  let offset = 0
+  try {
+    const packets = []
+    let offset = 0
 
-  while (offset < buf.length) {
-    if (offset + 16 > buf.length) break
+    while (offset < buf.length) {
+      if (offset + 16 > buf.length) break
 
-    // Check ACN PID
-    const pid = buf.slice(offset + 4, offset + 16)
-    if (!pid.equals(ACN_PID)) {
-      offset++
-      continue
+      // Check ACN PID
+      const pid = buf.slice(offset + 4, offset + 16)
+      if (!pid.equals(ACN_PID)) {
+        offset++
+        continue
+      }
+
+      if (offset + 22 > buf.length) break
+      const rootLen = ((buf[offset + 16] & 0x0F) << 8) | buf[offset + 17]
+      const total = 16 + rootLen
+      if (total < 2 || offset + total > buf.length) { offset++; continue }
+
+      const pkt = parseACNPacket(buf.slice(offset, offset + total))
+      if (pkt) packets.push(pkt)
+      offset += total
     }
 
-    if (offset + 18 > buf.length) break
-    const rootLen = ((buf[offset + 16] & 0x0F) << 8) | buf[offset + 17]
-    const total = 16 + rootLen
-    if (offset + total > buf.length) break
-
-    const pkt = parseACNPacket(buf.slice(offset, offset + total))
-    if (pkt) packets.push(pkt)
-    offset += total
+    return { packets, remainder: buf.slice(offset) }
+  } catch (_) {
+    return { packets: [], remainder: Buffer.alloc(0) }
   }
-
-  return { packets, remainder: buf.slice(offset) }
 }
 
 // ─── RDMnet class ─────────────────────────────────────────────────────────────
