@@ -424,53 +424,63 @@ class RDMnet extends EventEmitter {
       })
 
       sock.on('message', (msg, rinfo) => {
-        const parsed = parseMDNSResponse(msg)
-        if (!parsed) return
+        // MUST be wrapped in try/catch — this is a socket event handler.
+        // Any uncaught throw here becomes an uncaughtException → crash.
+        // (Promise try/catch does NOT protect event handler callbacks.)
+        try {
+          const parsed = parseMDNSResponse(msg)
+          if (!parsed) return
 
-        const allRecords = parsed.answers.concat(parsed.additionals || [])
+          const allRecords = parsed.answers.concat(parsed.additionals || [])
 
-        // First pass: collect service instance names from _rdmnet._tcp PTR records ONLY.
-        // We must NOT create entries for arbitrary A records — macOS mDNS floods us
-        // with its entire cache (Apple TVs, printers, MacBooks) when we send a query,
-        // and every .local hostname would falsely appear as an RDMnet device.
-        for (const record of allRecords) {
-          if (record.type === 'PTR' && record.name && record.name.includes('_rdmnet._tcp')) {
-            const svcName = record.data
-            if (svcName && !found.has(svcName)) {
-              found.set(svcName, { name: svcName, ip: rinfo.address, port: RDMNET_PORT, _srvTarget: null })
-            }
-          }
-        }
-
-        // Second pass: enrich known _rdmnet service instances with SRV/A data.
-        // SRV records: record.name = service instance name → extract target hostname + port.
-        // A records:   record.name = hostname (e.g. "pathscape.local") — does NOT match
-        //              service instance names, so we track the SRV target and use it to
-        //              resolve A records.
-        const srvTargets = new Map()  // hostname → [service instance names]
-        for (const record of allRecords) {
-          if (record.type === 'SRV' && found.has(record.name)) {
-            const entry = found.get(record.name)
-            entry.port = record.data.port
-            if (!entry.ip) entry.ip = rinfo.address
-            // Store the SRV target hostname so we can look it up in A records
-            const target = record.data.target
-            if (target) {
-              entry._srvTarget = target
-              if (!srvTargets.has(target)) srvTargets.set(target, [])
-              srvTargets.get(target).push(record.name)
-            }
-          }
-        }
-        // Now use A records to resolve the SRV targets to actual IP addresses
-        for (const record of allRecords) {
-          if (record.type === 'A' && srvTargets.has(record.name)) {
-            for (const svcName of srvTargets.get(record.name)) {
-              if (found.has(svcName)) {
-                found.get(svcName).ip = record.data
+          // First pass: collect service instance names from _rdmnet._tcp PTR records ONLY.
+          // We must NOT create entries for arbitrary A records — macOS mDNS floods us
+          // with its entire cache (Apple TVs, printers, MacBooks) when we send a query,
+          // and every .local hostname would falsely appear as an RDMnet device.
+          for (const record of allRecords) {
+            if (record.type === 'PTR' && record.name && record.name.includes('_rdmnet._tcp')) {
+              const svcName = record.data
+              if (svcName && !found.has(svcName)) {
+                found.set(svcName, { name: svcName, ip: rinfo.address, port: RDMNET_PORT, _srvTarget: null })
               }
             }
           }
+
+          // Second pass: enrich known _rdmnet service instances with SRV/A data.
+          // SRV records: record.name = service instance name → extract target hostname + port.
+          // A records:   record.name = hostname (e.g. "pathscape.local") — does NOT match
+          //              service instance names, so we track the SRV target and use it to
+          //              resolve A records.
+          const srvTargets = new Map()  // hostname → [service instance names]
+          for (const record of allRecords) {
+            if (record.type === 'SRV' && found.has(record.name)) {
+              const entry = found.get(record.name)
+              // record.data may be undefined for malformed SRV records (rdlen < 6)
+              if (!record.data) continue
+              entry.port = record.data.port
+              if (!entry.ip) entry.ip = rinfo.address
+              // Store the SRV target hostname so we can look it up in A records
+              const target = record.data.target
+              if (target) {
+                entry._srvTarget = target
+                if (!srvTargets.has(target)) srvTargets.set(target, [])
+                srvTargets.get(target).push(record.name)
+              }
+            }
+          }
+          // Now use A records to resolve the SRV targets to actual IP addresses
+          for (const record of allRecords) {
+            if (record.type === 'A' && srvTargets.has(record.name)) {
+              for (const svcName of srvTargets.get(record.name)) {
+                if (found.has(svcName)) {
+                  found.get(svcName).ip = record.data
+                }
+              }
+            }
+          }
+        } catch (_) {
+          // Swallow — malformed mDNS packet or unexpected record structure.
+          // Crashing the entire scan over a bad DNS packet is not acceptable.
         }
       })
     })
