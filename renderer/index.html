@@ -39,6 +39,8 @@
         <select id="ifaceSelect" class="iface-select" title="Network interface to scan on">
           <option value="0.0.0.0">Loading interfaces…</option>
         </select>
+        <input id="subnetOverride" class="subnet-input" type="text"
+               placeholder="e.g. 10.30.142" title="Optional: scan a specific subnet (enter first 3 octets)" maxlength="15" />
         <button id="scanBtn" class="btn btn-primary">
           <span class="btn-icon">⟳</span> Scan Network
         </button>
@@ -68,6 +70,19 @@
         <ul id="nodeList" class="node-list">
           <li class="node-item node-empty">No nodes found yet</li>
         </ul>
+      </section>
+
+      <section class="sidebar-section">
+        <h3 class="sidebar-heading">Manual Nodes</h3>
+        <p class="manual-nodes-hint">Add nodes by IP if they don't respond to ArtPoll (e.g. Pathport nodes)</p>
+        <div class="manual-node-row">
+          <input id="manualNodeIp"   class="manual-node-input" type="text"
+                 placeholder="10.30.142.39" maxlength="15" />
+          <input id="manualNodeName" class="manual-node-input manual-node-name" type="text"
+                 placeholder="Name (optional)" maxlength="32" />
+          <button id="addManualNodeBtn" class="btn btn-sm btn-primary">Add</button>
+        </div>
+        <ul id="manualNodeList" class="manual-node-list"></ul>
       </section>
 
       <section class="sidebar-section">

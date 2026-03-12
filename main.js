@@ -14,8 +14,9 @@ const Scanner = require('./src/scanner')
 
 const PKG = require('./package.json')
 
-let mainWindow = null
-let scanner    = null
+let mainWindow  = null
+let scanner     = null
+let manualNodes = []   // persists across scans: [{ ip, name, universes }]
 
 // ─── Window ──────────────────────────────────────────────────────────────────
 
@@ -71,12 +72,16 @@ function send(channel, data) {
 
 ipcMain.handle('get-network-interfaces', () => {
   const ifaces = os.networkInterfaces()
-  const results = [{ label: 'All interfaces (0.0.0.0)', address: '0.0.0.0' }]
+  const results = [{ label: 'All interfaces (0.0.0.0)', address: '0.0.0.0', broadcast: '255.255.255.255' }]
 
   for (const [name, addrs] of Object.entries(ifaces)) {
     for (const addr of addrs) {
       if (addr.family === 'IPv4' && !addr.internal) {
-        results.push({ label: `${name} — ${addr.address}`, address: addr.address })
+        // Compute subnet broadcast address from IP and netmask
+        const ipParts   = addr.address.split('.').map(Number)
+        const maskParts = addr.netmask.split('.').map(Number)
+        const broadcast = ipParts.map((octet, i) => (octet | (~maskParts[i] & 0xFF))).join('.')
+        results.push({ label: `${name} — ${addr.address}`, address: addr.address, broadcast })
       }
     }
   }
@@ -85,9 +90,47 @@ ipcMain.handle('get-network-interfaces', () => {
 
 // ─── Scan ─────────────────────────────────────────────────────────────────────
 
-ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0', protocol = 'both') => {
+ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0', protocol = 'both', broadcastAddress = '255.255.255.255', subnetOverride = '') => {
   // Clean up any existing scanner
   if (scanner) { scanner.stop(); scanner = null }
+
+  // Build the list of broadcast addresses to poll.
+  // If "All interfaces" is selected (0.0.0.0) enumerate every NIC's subnet broadcast
+  // so that Art-Net nodes on any connected network are discovered.
+  let broadcasts
+  if (bindAddress === '0.0.0.0') {
+    broadcasts = ['255.255.255.255']  // limited broadcast — reaches all NICs
+    const ifaces = os.networkInterfaces()
+    const has10 = false
+    for (const addrs of Object.values(ifaces)) {
+      for (const addr of addrs) {
+        if (addr.family === 'IPv4' && !addr.internal) {
+          const ipParts   = addr.address.split('.').map(Number)
+          const maskParts = addr.netmask.split('.').map(Number)
+          // Per-NIC subnet broadcast (e.g. 192.168.1.255 for a /24)
+          const bc = ipParts.map((o, i) => (o | (~maskParts[i] & 0xFF))).join('.')
+          if (!broadcasts.includes(bc)) broadcasts.push(bc)
+          // Class-A wider broadcast for 10.x.x.x NICs — catches devices
+          // configured with a /8 mask (e.g. Pathway Pathport nodes at 10.30.142.x
+          // with 255.0.0.0) that only respond to 10.255.255.255 broadcasts
+          if (ipParts[0] === 10 && !broadcasts.includes('10.255.255.255')) {
+            broadcasts.push('10.255.255.255')
+          }
+          // Similarly for 172.16-31.x.x and 192.168.x.x wider broadcasts
+          if (ipParts[0] === 172 && ipParts[1] >= 16 && ipParts[1] <= 31
+              && !broadcasts.includes('172.31.255.255')) {
+            broadcasts.push('172.31.255.255')
+          }
+          if (ipParts[0] === 192 && ipParts[1] === 168
+              && !broadcasts.includes('192.168.255.255')) {
+            broadcasts.push('192.168.255.255')
+          }
+        }
+      }
+    }
+  } else {
+    broadcasts = [broadcastAddress]
+  }
 
   scanner = new Scanner()
 
@@ -97,7 +140,8 @@ ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0', protocol = 
   scanner.on('error',      (err)    => send('scan-error',     { message: err.message }))
 
   try {
-    await scanner.start(bindAddress, protocol)
+    await scanner.start(bindAddress, protocol, broadcasts, subnetOverride)
+    scanner.setManualNodes(manualNodes)
     const devices = await scanner.fullScan(bindAddress, null, protocol)
     send('scan-done', { deviceCount: devices.length })
     return { ok: true, deviceCount: devices.length }
@@ -142,6 +186,25 @@ ipcMain.handle('identify-device', async (_event, device, on) => {
   } catch (e) {
     return { ok: false, error: e.message }
   }
+})
+
+// ─── Manual Nodes ─────────────────────────────────────────────────────────────
+
+ipcMain.handle('get-manual-nodes', () => manualNodes)
+
+ipcMain.handle('add-manual-node', (_event, ip, name) => {
+  // Validate basic IPv4 format
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return { ok: false, error: 'Invalid IP address' }
+  if (manualNodes.find(n => n.ip === ip)) return { ok: false, error: 'Node already added' }
+  // Default to 8 universes (0–7) on net 0, sub 0 — covers a full Pathport 8-port node
+  const universes = Array.from({ length: 8 }, (_, i) => ({ net: 0, sub: 0, uni: i }))
+  manualNodes.push({ ip, name: name || `Manual Node @ ${ip}`, universes })
+  return { ok: true }
+})
+
+ipcMain.handle('remove-manual-node', (_event, ip) => {
+  manualNodes = manualNodes.filter(n => n.ip !== ip)
+  return { ok: true }
 })
 
 // ─── Update Checker ──────────────────────────────────────────────────────────

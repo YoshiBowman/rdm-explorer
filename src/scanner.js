@@ -23,21 +23,29 @@ class Scanner extends EventEmitter {
     this.sacn   = new SACN()
     this.nodes  = new Map()        // ip → node info (Art-Net)
     this.sacnSources = new Map()   // cid → source info (sACN)
+    this.dmxSources  = new Map()   // ip → passive ArtDmx source info
+    this.manualNodes = new Map()   // ip → manually added node info
     this._pendingCallback = null
     this.running = false
   }
 
   /**
    * Start the scanner on the given bind address.
-   * @param {string}  bindAddress - Local IP to bind on
-   * @param {string}  protocol    - 'artnet', 'sacn', or 'both'
+   * @param {string}          bindAddress    - Local IP to bind on (informational only; socket binds 0.0.0.0)
+   * @param {string}          protocol       - 'artnet', 'sacn', or 'both'
+   * @param {string|string[]} broadcasts     - One or more subnet broadcast addresses for ArtPoll
+   * @param {string}          subnetOverride - Optional prefix like "10.30.142" for unicast sweep
    */
-  async start(bindAddress = '0.0.0.0', protocol = 'both') {
+  async start(bindAddress = '0.0.0.0', protocol = 'both', broadcasts = ['255.255.255.255'], subnetOverride = '') {
+    // Normalise to array and deduplicate
+    this.broadcasts = [...new Set(Array.isArray(broadcasts) ? broadcasts : [broadcasts])]
+    // Store subnet override for unicast sweep (e.g. "10.30.142")
+    this.subnetOverride = (subnetOverride || '').trim().replace(/\.$/, '')
     const startArtNet = protocol === 'artnet' || protocol === 'both'
     const startSACN   = protocol === 'sacn'   || protocol === 'both'
 
     if (startArtNet) {
-      await this.artnet.start(bindAddress)
+      await this.artnet.start()
 
       this.artnet.on('artPollReply', (node) => {
         if (node) {
@@ -54,6 +62,12 @@ class Scanner extends EventEmitter {
           this._pendingCallback = null
           cb(data, rinfo)
         }
+      })
+
+      // Passive ArtDmx source detection — track any device sending ArtDmx
+      this.artnet.on('artDmx', (dmxInfo) => {
+        if (!dmxInfo) return
+        this._registerDmxSource(dmxInfo)
       })
 
       this.artnet.on('error', (err) => this.emit('error', err))
@@ -79,17 +93,76 @@ class Scanner extends EventEmitter {
   stop() {
     this.artnet.stop()
     this.sacn.stop()
+    this.dmxSources.clear()
     this.running = false
+  }
+
+  // ─── Manual Nodes ────────────────────────────────────────────────────────────
+
+  /**
+   * Replace the manual node list before a scan starts.
+   * Each entry: { ip, name, universes }
+   */
+  setManualNodes(nodes = []) {
+    this.manualNodes.clear()
+    for (const n of nodes) {
+      this.manualNodes.set(n.ip, {
+        ip:          n.ip,
+        shortName:   n.name || `Manual Node @ ${n.ip}`,
+        longName:    n.name || `Manually added node at ${n.ip}`,
+        universes:   n.universes || [{ net: 0, sub: 0, uni: 0 }],
+        supportsRDM: true,
+        protocol:    'artnet-manual',
+        manual:      true,
+      })
+    }
   }
 
   // ─── Art-Net Node Discovery ─────────────────────────────────────────────────
 
   async discoverNodes() {
     this.nodes.clear()
-    this.artnet.sendArtPoll()
+
+    // Standard broadcast ArtPoll on all known subnets
+    for (const bc of this.broadcasts) this.artnet.sendArtPoll(bc)
+
+    // If a subnet override is set (e.g. "10.30.142"), unicast ArtPoll to every
+    // host in that /24. This reaches nodes on remote subnets that don't receive
+    // our broadcast (e.g. Pathport nodes on a dedicated lighting network).
+    if (this.subnetOverride) {
+      const parts = this.subnetOverride.split('.')
+      if (parts.length === 3) {
+        for (let h = 1; h <= 254; h++) {
+          this.artnet.sendArtPoll(`${this.subnetOverride}.${h}`)
+          if (h % 50 === 0) await this._delay(10)
+        }
+      }
+    }
+
     await this._delay(800)
-    this.artnet.sendArtPoll()
+    for (const bc of this.broadcasts) this.artnet.sendArtPoll(bc)
     await this._delay(POLL_WAIT_MS - 800)
+
+    // Follow-up: unicast ArtPoll to any passively-detected ArtDmx sources
+    // that haven't yet replied to a broadcast poll. This catches consoles
+    // (e.g. GrandMA2) that only respond to direct unicast.
+    const unresolved = Array.from(this.dmxSources.keys()).filter(ip => !this.nodes.has(ip))
+    if (unresolved.length > 0) {
+      for (const ip of unresolved) this.artnet.sendArtPoll(ip)
+      await this._delay(600)
+      // One more pass for any that were slow to respond
+      for (const ip of unresolved) this.artnet.sendArtPoll(ip)
+      await this._delay(600)
+    }
+
+    // Inject manually added nodes — they skip ArtPoll entirely
+    for (const [ip, node] of this.manualNodes) {
+      if (!this.nodes.has(ip)) {
+        this.nodes.set(ip, node)
+        this.emit('nodeFound', node)
+      }
+    }
+
     return Array.from(this.nodes.values())
   }
 
@@ -103,6 +176,48 @@ class Scanner extends EventEmitter {
     this.sacnSources.clear()
     await this._delay(SACN_LISTEN_MS)
     return Array.from(this.sacnSources.values())
+  }
+
+  // ─── Passive ArtDmx Source Tracking ─────────────────────────────────────────
+
+  _registerDmxSource(dmxInfo) {
+    const { ip, net, subNet, universe } = dmxInfo
+    const uniKey = `${net}.${subNet}.${universe}`
+
+    if (this.dmxSources.has(ip)) {
+      const existing = this.dmxSources.get(ip)
+      if (!existing._uniSet.has(uniKey)) {
+        existing._uniSet.add(uniKey)
+        existing.universes.push({ net, sub: subNet, uni: universe })
+      }
+      existing.lastSeen = Date.now()
+      existing.packetCount++
+      return
+    }
+
+    const source = {
+      ip,
+      shortName:   `ArtDmx Source @ ${ip}`,
+      longName:    `Passively discovered ArtDmx source at ${ip}`,
+      universes:   [{ net, sub: subNet, uni: universe }],
+      _uniSet:     new Set([uniKey]),
+      supportsRDM: false,
+      protocol:    'artnet-passive',
+      lastSeen:    Date.now(),
+      packetCount: 1,
+    }
+    this.dmxSources.set(ip, source)
+    this.emit('nodeFound', source)
+  }
+
+  /**
+   * Return all passively discovered ArtDmx sources.
+   */
+  getDmxSources() {
+    return Array.from(this.dmxSources.values()).map(s => {
+      const { _uniSet, ...clean } = s
+      return clean
+    })
   }
 
   // ─── RDM Send / Receive ─────────────────────────────────────────────────────
@@ -272,6 +387,7 @@ class Scanner extends EventEmitter {
 
       // ── Art-Net Discovery ──────────────────────────────────────────────────
       if (scanArtNet) {
+        report(`Sending ArtPoll to: ${this.broadcasts.join(', ')}${this.subnetOverride ? ` + unicast sweep of ${this.subnetOverride}.1–254` : ''}`)
         report('Searching for Art-Net nodes on the network…')
         const nodes = await this.discoverNodes()
 
@@ -347,8 +463,22 @@ class Scanner extends EventEmitter {
         }
       }
 
+      // Report passive ArtDmx sources that weren't found via ArtPollReply
+      if (scanArtNet && this.dmxSources.size > 0) {
+        const passiveOnly = Array.from(this.dmxSources.values())
+          .filter(s => !this.nodes.has(s.ip))
+        if (passiveOnly.length > 0) {
+          report(`Detected ${passiveOnly.length} ArtDmx source(s) via passive listening:`)
+          for (const src of passiveOnly) {
+            const unis = src.universes.map(u => `${u.net}.${u.sub}.${u.uni}`).join(', ')
+            report(`  ${src.ip} — ${src.universes.length} universe(s): ${unis} (${src.packetCount} packets)`)
+          }
+        }
+      }
+
       const totalNodes = (scanArtNet ? this.nodes.size : 0) +
-                         (scanSACN ? this.sacnSources.size : 0)
+                         (scanSACN ? this.sacnSources.size : 0) +
+                         (scanArtNet ? this.dmxSources.size : 0)
       report(`Scan complete — ${totalNodes} node(s), ${allDevices.length} RDM device(s) found.`, { done: true })
       return allDevices
 

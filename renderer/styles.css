@@ -150,6 +150,83 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
 }
 .iface-select:focus { border-color: var(--accent); }
 
+.subnet-input {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  padding: 6px 10px;
+  width: 110px;
+  outline: none;
+}
+.subnet-input:focus { border-color: var(--accent); }
+.subnet-input::placeholder { color: var(--text-dim); font-size: 11px; }
+
+/* ─── Manual Nodes ──────────────────────────────────────────────────────────── */
+.manual-nodes-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+.manual-node-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  align-items: center;
+}
+.manual-node-input {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 11px;
+  padding: 4px 7px;
+  height: 28px;
+  outline: none;
+  min-width: 0;
+  flex: 1;
+}
+.manual-node-input.manual-node-name { flex: 1.2; }
+.manual-node-input:focus { border-color: var(--accent); }
+.manual-node-input::placeholder { color: var(--text-dim); }
+.manual-node-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.manual-node-empty {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 2px 0;
+}
+.manual-node-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+}
+.manual-node-info { display: flex; flex-direction: column; gap: 1px; }
+.manual-node-name-text { font-size: 12px; font-weight: 500; color: var(--text); }
+.manual-node-ip-text   { font-size: 10px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.manual-node-remove {
+  background: none; border: none; color: var(--text-dim);
+  cursor: pointer; font-size: 11px; padding: 2px 4px; border-radius: 3px; line-height: 1;
+}
+.manual-node-remove:hover { color: var(--red); background: rgba(240,96,96,0.1); }
+.proto-badge-artnet-manual,
+.node-manual-tag {
+  background: rgba(155,114,245,0.15);
+  color: var(--purple);
+  border: 1px solid rgba(155,114,245,0.3);
+}
+.node-manual-tag { font-size: 10px; padding: 1px 5px; border-radius: 3px; }
+
 /* Buttons */
 .btn {
   display: inline-flex;
@@ -278,6 +355,7 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
 .node-ip   { font-size: 11px; color: var(--text-muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
 .node-rdm  { font-size: 10px; color: var(--green); }
 .node-sacn-tag { font-size: 10px; color: var(--cyan); }
+.node-passive-tag { font-size: 10px; color: var(--amber); }
 
 .node-proto-row {
   display: flex;
@@ -288,6 +366,7 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
 
 /* ─── Protocol Badges ───────────────────────────────────────────────────────── */
 .proto-badge-artnet,
+.proto-badge-artnet-passive,
 .proto-badge-sacn,
 .card-proto-badge {
   display: inline-block;
@@ -307,6 +386,11 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
   background: rgba(48,213,200,0.15);
   color: var(--cyan);
   border: 1px solid rgba(48,213,200,0.3);
+}
+.proto-badge-artnet-passive {
+  background: rgba(240,168,50,0.15);
+  color: var(--amber);
+  border: 1px solid rgba(240,168,50,0.3);
 }
 
 /* Filters */

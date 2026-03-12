@@ -20,6 +20,7 @@ const State = {
 // ─── Init ─────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
   await loadInterfaces()
+  await loadManualNodes()
 
   window.rdm.onNodeFound(   (node)   => addNode(node))
   window.rdm.onDeviceFound( (device) => addDevice(device))
@@ -30,6 +31,8 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // ── Wire up UI event listeners ───────────────────────────────────────────
   document.getElementById('scanBtn').addEventListener('click', () => App.startScan())
+  document.getElementById('addManualNodeBtn').addEventListener('click', () => App.addManualNode())
+  document.getElementById('manualNodeIp').addEventListener('keydown', e => { if (e.key === 'Enter') App.addManualNode() })
   document.getElementById('demoBtn').addEventListener('click', () => App.loadDemo())
   document.getElementById('filterInput').addEventListener('input', () => App.applyFilter())
   document.getElementById('categoryFilter').addEventListener('change', () => App.applyFilter())
@@ -64,11 +67,36 @@ window.addEventListener('DOMContentLoaded', async () => {
   })
 })
 
+// ─── Manual Nodes ─────────────────────────────────────────────────────────────
+async function loadManualNodes() {
+  const nodes = await window.rdm.getManualNodes()
+  renderManualNodes(nodes)
+}
+
+function renderManualNodes(nodes) {
+  const list = document.getElementById('manualNodeList')
+  if (!nodes || nodes.length === 0) {
+    list.innerHTML = '<li class="manual-node-empty">No manual nodes added</li>'
+    return
+  }
+  list.innerHTML = nodes.map(n => `
+    <li class="manual-node-item">
+      <div class="manual-node-info">
+        <span class="manual-node-name-text">${escHtml(n.name)}</span>
+        <span class="manual-node-ip-text">${escHtml(n.ip)}</span>
+      </div>
+      <button class="manual-node-remove" onclick="App.removeManualNode('${escHtml(n.ip)}')" title="Remove">✕</button>
+    </li>
+  `).join('')
+}
+
 // ─── Network Interfaces ───────────────────────────────────────────────────────
 async function loadInterfaces() {
   const ifaces = await window.rdm.getNetworkInterfaces()
   const sel = document.getElementById('ifaceSelect')
-  sel.innerHTML = ifaces.map(i => `<option value="${i.address}">${i.label}</option>`).join('')
+  sel.innerHTML = ifaces.map(i =>
+    `<option value="${i.address}" data-broadcast="${i.broadcast || '255.255.255.255'}">${i.label}</option>`
+  ).join('')
 }
 
 // ─── Update Banner ──────────────────────────────────────────────────────────
@@ -91,8 +119,32 @@ const App = {
     setScanningUI(true)
     log(`Starting scan (${protocolLabel()})…`)
 
-    const bindAddress = document.getElementById('ifaceSelect').value
-    await window.rdm.startScan(bindAddress, State.protocol)
+    const sel = document.getElementById('ifaceSelect')
+    const bindAddress = sel.value
+    const broadcastAddress = sel.options[sel.selectedIndex].dataset.broadcast || '255.255.255.255'
+    const subnetOverride = document.getElementById('subnetOverride').value.trim()
+    await window.rdm.startScan(bindAddress, State.protocol, broadcastAddress, subnetOverride)
+  },
+
+  async addManualNode() {
+    const ip   = document.getElementById('manualNodeIp').value.trim()
+    const name = document.getElementById('manualNodeName').value.trim()
+    if (!ip) return
+    const res = await window.rdm.addManualNode(ip, name)
+    if (res.ok) {
+      document.getElementById('manualNodeIp').value   = ''
+      document.getElementById('manualNodeName').value = ''
+      const nodes = await window.rdm.getManualNodes()
+      renderManualNodes(nodes)
+    } else {
+      log(`Could not add node: ${res.error}`, 'err')
+    }
+  },
+
+  async removeManualNode(ip) {
+    await window.rdm.removeManualNode(ip)
+    const nodes = await window.rdm.getManualNodes()
+    renderManualNodes(nodes)
   },
 
   loadDemo() {
@@ -239,7 +291,7 @@ function setStatus(text, type) {
 
 // ─── Nodes ────────────────────────────────────────────────────────────────────
 function addNode(node) {
-  // Avoid duplicates by ip
+  // Avoid duplicates by ip+protocol
   if (State.nodes.find(n => n.ip === node.ip && n.protocol === node.protocol)) return
   State.nodes.push(node)
 
@@ -247,10 +299,25 @@ function addNode(node) {
   const empty = list.querySelector('.node-empty')
   if (empty) list.removeChild(empty)
 
-  const proto = node.protocol === 'sacn' ? 'sACN' : 'Art-Net'
-  const rdmTag = node.protocol === 'sacn'
-    ? '<div class="node-rdm node-sacn-tag">sACN</div>'
-    : `<div class="node-rdm">${node.supportsRDM ? '&#10003; RDM' : '&#9675; No RDM'}</div>`
+  let proto, protoClass, rdmTag
+  if (node.protocol === 'sacn') {
+    proto = 'sACN'
+    protoClass = 'sacn'
+    rdmTag = '<div class="node-rdm node-sacn-tag">sACN</div>'
+  } else if (node.protocol === 'artnet-passive') {
+    proto = 'ArtDmx'
+    protoClass = 'artnet-passive'
+    const uniCount = node.universes ? node.universes.length : 0
+    rdmTag = `<div class="node-rdm node-passive-tag">${uniCount} uni · passive</div>`
+  } else if (node.protocol === 'artnet-manual') {
+    proto = 'Manual'
+    protoClass = 'artnet-manual'
+    rdmTag = '<div class="node-manual-tag">manual · RDM</div>'
+  } else {
+    proto = 'Art-Net'
+    protoClass = 'artnet'
+    rdmTag = `<div class="node-rdm">${node.supportsRDM ? '&#10003; RDM' : '&#9675; No RDM'}</div>`
+  }
 
   const li = document.createElement('li')
   li.className = 'node-item node-real'
@@ -258,7 +325,7 @@ function addNode(node) {
     <div class="node-name">${escHtml(node.shortName)}</div>
     <div class="node-ip">${escHtml(node.ip)}</div>
     <div class="node-proto-row">
-      <span class="node-proto-badge proto-badge-${node.protocol || 'artnet'}">${escHtml(proto)}</span>
+      <span class="node-proto-badge proto-badge-${protoClass}">${escHtml(proto)}</span>
       ${rdmTag}
     </div>
   `

@@ -16,6 +16,7 @@ const PROTOCOL_VERSION = 14
 const OP = {
   POLL:       0x2000,
   POLL_REPLY: 0x2100,
+  DMX:        0x5000,
   RDM:        0x8002,
 }
 
@@ -27,16 +28,18 @@ class ArtNet extends EventEmitter {
 
   /**
    * Bind the UDP socket and begin listening.
-   * @param {string} bindAddress - Local IP to bind on (default 0.0.0.0)
+   * Always binds to 0.0.0.0 so that broadcast ArtPollReply packets sent to
+   * 255.255.255.255 are received regardless of which NIC the user selected.
+   * (Binding to a specific IP on macOS causes the socket to miss broadcasts.)
    */
-  start(bindAddress = '0.0.0.0') {
+  start() {
     return new Promise((resolve, reject) => {
       this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
 
       this.socket.on('message', (msg, rinfo) => this._handleMessage(msg, rinfo))
       this.socket.on('error', (err) => { this.emit('error', err); reject(err) })
 
-      this.socket.bind(ARTNET_PORT, bindAddress, () => {
+      this.socket.bind(ARTNET_PORT, '0.0.0.0', () => {
         try { this.socket.setBroadcast(true) } catch (_) {}
         resolve()
       })
@@ -50,15 +53,18 @@ class ArtNet extends EventEmitter {
     }
   }
 
-  /** Broadcast an ArtPoll to find all nodes on the network. */
-  sendArtPoll() {
+  /**
+   * Broadcast an ArtPoll to find all nodes on the network.
+   * @param {string} broadcastAddress - Subnet broadcast address (default 255.255.255.255)
+   */
+  sendArtPoll(broadcastAddress = '255.255.255.255') {
     const buf = Buffer.alloc(14)
     ARTNET_HEADER.copy(buf, 0)
     buf.writeUInt16LE(OP.POLL, 8)
     buf.writeUInt16BE(PROTOCOL_VERSION, 10)
     buf.writeUInt8(0x02, 12) // TalkToMe: unicast replies on change
     buf.writeUInt8(0x00, 13) // Priority: DmxStartAddress
-    this._send(buf, '255.255.255.255', ARTNET_PORT)
+    this._send(buf, broadcastAddress, ARTNET_PORT)
   }
 
   /**
@@ -100,12 +106,40 @@ class ArtNet extends EventEmitter {
       case OP.POLL_REPLY:
         this.emit('artPollReply', this._parseArtPollReply(msg, rinfo))
         break
+      case OP.DMX:
+        this.emit('artDmx', this._parseArtDmx(msg, rinfo))
+        break
       case OP.RDM:
         // RDM payload starts at byte 19
         if (msg.length > 19) {
           this.emit('artRdmData', msg.slice(19), rinfo)
         }
         break
+    }
+  }
+
+  /**
+   * Parse an ArtDmx (0x5000) packet — extracts source IP and universe info.
+   * Used for passive discovery of DMX sources on the network.
+   */
+  _parseArtDmx(msg, rinfo) {
+    if (msg.length < 18) return null
+    const sequence  = msg[12]
+    const physical  = msg[13]
+    const subUni    = msg[14]        // Low byte: Sub-Uni
+    const net       = msg[15] & 0x7F // High byte: Net
+    const lengthHi  = msg[16]
+    const lengthLo  = msg[17]
+    const dataLen   = (lengthHi << 8) | lengthLo
+
+    return {
+      ip:       rinfo.address,
+      net,
+      subNet:   (subUni >> 4) & 0x0F,
+      universe: subUni & 0x0F,
+      sequence,
+      physical,
+      dataLen,
     }
   }
 

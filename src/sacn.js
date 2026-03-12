@@ -59,14 +59,28 @@ class SACN extends EventEmitter {
       this.socket.on('error', (err) => this.emit('error', err))
 
       this.socket.bind(SACN_PORT, () => {
-        // Join Universe Discovery multicast group
-        try {
-          const discoveryAddr = universeToMulticast(SACN_DISCOVERY_UNIVERSE)
-          this.socket.addMembership(discoveryAddr)
-          this.joinedUniverses.add(SACN_DISCOVERY_UNIVERSE)
-        } catch (e) {
-          this.emit('error', new Error(`sACN discovery multicast join failed: ${e.message}`))
+        // Gather all non-internal IPv4 addresses so we can join multicast
+        // on every NIC — important when lighting traffic is on a different
+        // interface than the default route (e.g. wired vs WiFi).
+        const os = require('os')
+        const localIPs = ['0.0.0.0']
+        for (const addrs of Object.values(os.networkInterfaces())) {
+          for (const a of addrs) {
+            if (a.family === 'IPv4' && !a.internal) localIPs.push(a.address)
+          }
         }
+
+        // Join Universe Discovery multicast group on every interface
+        const discoveryAddr = universeToMulticast(SACN_DISCOVERY_UNIVERSE)
+        for (const lip of localIPs) {
+          try {
+            this.socket.addMembership(discoveryAddr, lip)
+            this.joinedUniverses.add(SACN_DISCOVERY_UNIVERSE)
+          } catch (_) { /* already joined or interface doesn't support multicast */ }
+        }
+
+        // Store local IPs for future universe joins
+        this._localIPs = localIPs
 
         // Join first 8 common universes to detect active sources
         for (let uni = 1; uni <= 8; uni++) {
@@ -93,12 +107,16 @@ class SACN extends EventEmitter {
    */
   joinUniverse(universe) {
     if (this.joinedUniverses.has(universe) || !this.socket) return
-    try {
-      this.socket.addMembership(universeToMulticast(universe))
-      this.joinedUniverses.add(universe)
-    } catch (_) {
-      // Silently ignore — some interfaces don't support multicast
+    const mcast = universeToMulticast(universe)
+    const ifaces = this._localIPs || ['0.0.0.0']
+    for (const lip of ifaces) {
+      try {
+        this.socket.addMembership(mcast, lip)
+      } catch (_) {
+        // Silently ignore — already joined or interface doesn't support multicast
+      }
     }
+    this.joinedUniverses.add(universe)
   }
 
   _handleMessage(msg, rinfo) {

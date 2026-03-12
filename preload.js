@@ -11,8 +11,13 @@ const { contextBridge, ipcRenderer } = require('electron')
 contextBridge.exposeInMainWorld('rdm', {
   // ── Discovery & Scanning ────────────────────────────────────────────────────
   getNetworkInterfaces: ()                        => ipcRenderer.invoke('get-network-interfaces'),
-  startScan:            (bindAddress, protocol)    => ipcRenderer.invoke('start-scan', bindAddress, protocol),
+  startScan:            (bindAddress, protocol, broadcastAddress, subnetOverride) => ipcRenderer.invoke('start-scan', bindAddress, protocol, broadcastAddress, subnetOverride),
   stopScan:             ()                         => ipcRenderer.invoke('stop-scan'),
+
+  // ── Manual Nodes ────────────────────────────────────────────────────────────
+  getManualNodes:   ()          => ipcRenderer.invoke('get-manual-nodes'),
+  addManualNode:    (ip, name)  => ipcRenderer.invoke('add-manual-node', ip, name),
+  removeManualNode: (ip)        => ipcRenderer.invoke('remove-manual-node', ip),
 
   // ── Device Control ──────────────────────────────────────────────────────────
   setDmxAddress:  (device, address) => ipcRenderer.invoke('set-dmx-address', device, address),
