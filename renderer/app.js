@@ -8,13 +8,14 @@
 
 // ─── State ────────────────────────────────────────────────────────────────────
 const State = {
-  devices:    [],   // All discovered devices
-  nodes:      [],   // Discovered Art-Net / sACN nodes
-  filtered:   [],   // Devices after filter/sort
-  scanning:   false,
+  devices:      [],     // All discovered devices
+  nodes:        [],     // Discovered Art-Net / sACN nodes
+  filtered:     [],     // Devices after filter/sort
+  scanning:     false,
   activeDevice: null,
-  isDemo:     false,
-  protocol:   'both',  // 'artnet', 'sacn', or 'both'
+  isDemo:       false,
+  protocol:     'both', // 'artnet', 'sacn', or 'both'
+  hidePassive:  false,  // hide passive ArtDmx sources (media servers / consoles)
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
@@ -24,7 +25,14 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   window.rdm.onNodeFound(   (node)   => addNode(node))
   window.rdm.onDeviceFound( (device) => addDevice(device))
-  window.rdm.onProgress(    (data)   => log(data.message, data.done ? 'done' : data.error ? 'err' : ''))
+  window.rdm.onProgress(    (data)   => {
+    const msg  = data.message || ''
+    const type = data.done    ? 'done'
+               : data.error   ? 'err'
+               : msg.includes('WARNING') || msg.includes('⚠') ? 'warn'
+               : ''
+    log(msg, type)
+  })
   window.rdm.onScanDone(    (data)   => scanFinished(data))
   window.rdm.onError(       (data)   => { log('Error: ' + data.message, 'err'); scanFinished(null, true) })
   window.rdm.onUpdateAvailable((info) => showUpdateBanner(info))
@@ -65,6 +73,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('updateBanner').style.display = 'none'
     document.body.classList.remove('has-update')
   })
+
+  // Copy log to clipboard
+  document.getElementById('copyLogBtn').addEventListener('click', () => App.copyLog())
+
+  // Hide / show passive ArtDmx sources in the node list
+  document.getElementById('hidePassiveBtn').addEventListener('click', () => App.toggleHidePassive())
 })
 
 // ─── Manual Nodes ─────────────────────────────────────────────────────────────
@@ -253,6 +267,41 @@ const App = {
     const res = await window.rdm.identifyDevice(device, false)
     res?.ok ? showFeedback('Identify OFF', true) : showFeedback('Failed to send identify', false)
   },
+
+  // Copy all log entries to the system clipboard
+  copyLog() {
+    const box = document.getElementById('logBox')
+    const lines = Array.from(box.querySelectorAll('.log-entry'))
+      .map(el => el.textContent)
+      .join('\n')
+    if (!lines) return
+    navigator.clipboard.writeText(lines).then(() => {
+      const btn = document.getElementById('copyLogBtn')
+      const orig = btn.textContent
+      btn.textContent = '✓ Copied'
+      btn.classList.add('copied')
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied') }, 1800)
+    }).catch(() => {
+      // Fallback for environments without clipboard API
+      const ta = document.createElement('textarea')
+      ta.value = lines
+      ta.style.position = 'fixed'
+      ta.style.opacity  = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    })
+  },
+
+  // Toggle whether passive ArtDmx sources are shown in the node list
+  toggleHidePassive() {
+    State.hidePassive = !State.hidePassive
+    const btn = document.getElementById('hidePassiveBtn')
+    btn.classList.toggle('active', State.hidePassive)
+    btn.textContent = State.hidePassive ? 'Show passive' : 'Hide passive'
+    rerenderNodeList()
+  },
 }
 window.App = App
 
@@ -294,11 +343,10 @@ function addNode(node) {
   // Avoid duplicates by ip+protocol
   if (State.nodes.find(n => n.ip === node.ip && n.protocol === node.protocol)) return
   State.nodes.push(node)
+  rerenderNodeList()
+}
 
-  const list = document.getElementById('nodeList')
-  const empty = list.querySelector('.node-empty')
-  if (empty) list.removeChild(empty)
-
+function buildNodeLi(node) {
   let proto, protoClass, rdmTag
   if (node.protocol === 'sacn') {
     proto = 'sACN'
@@ -308,7 +356,8 @@ function addNode(node) {
     proto = 'ArtDmx'
     protoClass = 'artnet-passive'
     const uniCount = node.universes ? node.universes.length : 0
-    rdmTag = `<div class="node-rdm node-passive-tag">${uniCount} uni · passive</div>`
+    const pktCount = node.packetCount ? ` · ${node.packetCount} pkts` : ''
+    rdmTag = `<div class="node-rdm node-passive-tag">${uniCount} uni${pktCount}</div>`
   } else if (node.protocol === 'artnet-manual') {
     proto = 'Manual'
     protoClass = 'artnet-manual'
@@ -329,7 +378,24 @@ function addNode(node) {
       ${rdmTag}
     </div>
   `
-  list.appendChild(li)
+  return li
+}
+
+function rerenderNodeList() {
+  const list  = document.getElementById('nodeList')
+  list.innerHTML = ''
+
+  const visible = State.nodes.filter(n =>
+    !(State.hidePassive && n.protocol === 'artnet-passive')
+  )
+
+  if (visible.length === 0) {
+    list.innerHTML = '<li class="node-item node-empty">No nodes found yet</li>'
+  } else {
+    visible.forEach(n => list.appendChild(buildNodeLi(n)))
+  }
+
+  // Badge shows total regardless of filter so user knows how many exist
   document.getElementById('nodeCount').textContent = State.nodes.length
 }
 
@@ -496,7 +562,7 @@ function clearAll() {
   State.devices  = []
   State.nodes    = []
   State.filtered = []
-  document.getElementById('nodeList').innerHTML = '<li class="node-item node-empty">No nodes found yet</li>'
+  rerenderNodeList()
   document.getElementById('nodeCount').textContent    = '0'
   document.getElementById('deviceGrid').innerHTML     = ''
   document.getElementById('deviceGrid').style.display = 'none'

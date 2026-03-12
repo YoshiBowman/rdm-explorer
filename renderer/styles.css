@@ -302,13 +302,20 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
   display: flex;
   flex-direction: column;
   height: 100%;
+  overflow: hidden;   /* outer sidebar does NOT scroll — children handle their own */
+  min-height: 0;
+}
+
+/* Scrollable top area (nodes, manual nodes, filter) */
+.sidebar-top {
+  flex: 1 1 auto;
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
 }
-.sidebar::-webkit-scrollbar { width: 4px; }
-.sidebar::-webkit-scrollbar-track { background: transparent; }
-.sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.sidebar-top::-webkit-scrollbar { width: 4px; }
+.sidebar-top::-webkit-scrollbar-track { background: transparent; }
+.sidebar-top::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
 .sidebar-section {
   padding: 14px 14px 10px;
@@ -327,6 +334,25 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
   gap: 8px;
 }
 
+/* "Hide passive" toggle button in Nodes heading */
+.sidebar-toggle-btn {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+.sidebar-toggle-btn:hover   { color: var(--text); border-color: var(--border-h); }
+.sidebar-toggle-btn.active  { color: var(--amber); border-color: var(--amber); }
+
 .badge {
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -338,15 +364,13 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
   font-variant-numeric: tabular-nums;
 }
 
-/* Node list */
+/* Node list — no max-height; sidebar-top scrolls the whole section */
 .node-list {
   list-style: none;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-height: 300px;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: visible;
 }
 .node-item {
   padding: 7px 10px;
@@ -437,15 +461,42 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
 }
 .filter-select:focus { border-color: var(--accent); }
 
-/* Log */
+/* Log — fixed height, always anchored to the bottom of the sidebar */
 .sidebar-log-section {
-  flex: 1;
+  flex: 0 0 auto;
+  height: 220px;
+  border-top: 1px solid var(--border);
   border-bottom: none;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding-bottom: 14px;
+  padding: 14px 14px 10px;
+  background: var(--bg-sidebar);
 }
+
+.sidebar-log-heading {
+  flex-shrink: 0;
+  margin-bottom: 6px;
+}
+
+/* Copy-log button */
+.log-copy-btn {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.log-copy-btn:hover  { color: var(--accent); border-color: var(--accent); }
+.log-copy-btn.copied { color: var(--green);  border-color: var(--green);  }
+
 .log-box {
   flex: 1;
   overflow-y: auto;
@@ -458,9 +509,10 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
 .log-box::-webkit-scrollbar { width: 4px; }
 .log-box::-webkit-scrollbar-track { background: transparent; }
 .log-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-.log-entry { padding: 1px 0; }
+.log-entry { padding: 1px 0; word-break: break-word; }
 .log-entry.log-done { color: var(--green); }
 .log-entry.log-err  { color: var(--red); }
+.log-entry.log-warn { color: var(--amber); }
 
 /* ─── Main Content ──────────────────────────────────────────────────────────── */
 .main-content {
