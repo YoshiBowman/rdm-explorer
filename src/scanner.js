@@ -385,6 +385,11 @@ class Scanner extends EventEmitter {
     const scanArtNet = protocol === 'artnet' || protocol === 'both'
     const scanSACN   = protocol === 'sacn'   || protocol === 'both'
 
+    // Convenience: check whether this scanner was stopped mid-scan.
+    // If stop() was called (e.g. because a new scan started), bail out
+    // early rather than continuing to burn CPU/network on stale work.
+    const alive = () => this.running
+
     const report = (msg, extra = {}) => {
       this.emit('progress', { message: msg, ...extra })
       if (onProgress) onProgress({ message: msg, ...extra })
@@ -394,15 +399,19 @@ class Scanner extends EventEmitter {
       const allDevices = []
 
       // Emit a timestamped scan header so each scan is clearly delimited in the log
+      const iface = bindAddress === '0.0.0.0' ? 'all interfaces' : bindAddress
+      const protoLabel = scanArtNet && scanSACN ? 'Art-Net + sACN' : scanArtNet ? 'Art-Net' : 'sACN'
       report(`──────────────────────────────────────────────────────`)
       report(`Scan started: ${new Date().toLocaleString()}`)
+      report(`Interface: ${iface}  ·  Protocol: ${protoLabel}`)
+      if (this.subnetOverride) report(`Subnet override: ${this.subnetOverride}.0/24`)
       report(`──────────────────────────────────────────────────────`)
 
       // ── mDNS RDMnet pre-scan (once, before per-node work) ─────────────────
       // Run this early so results are ready to display per-node without
       // re-querying the network 4 times.
       let mdnsRDMnetServices = []
-      if (scanArtNet) {
+      if (scanArtNet && alive()) {
         report('Pre-scanning for _rdmnet._tcp.local services via mDNS…')
         try {
           mdnsRDMnetServices = await Promise.race([
@@ -422,11 +431,14 @@ class Scanner extends EventEmitter {
         }
       }
 
+      if (!alive()) return allDevices  // scanner was stopped during mDNS
+
       // ── Art-Net Discovery ──────────────────────────────────────────────────
       if (scanArtNet) {
         report(`Sending ArtPoll to: ${this.broadcasts.join(', ')}${this.subnetOverride ? ` + unicast sweep of ${this.subnetOverride}.1–254` : ''}`)
         report('Searching for Art-Net nodes on the network…')
         const nodes = await this.discoverNodes()
+        if (!alive()) return allDevices  // stopped during ArtPoll wait
 
         if (nodes.length === 0) {
           report('No Art-Net nodes found.')
@@ -434,6 +446,8 @@ class Scanner extends EventEmitter {
           report(`Found ${nodes.length} Art-Net node(s). Starting RDM discovery…`, { nodes })
 
           for (const node of nodes) {
+            if (!alive()) break  // scanner stopped — exit node loop immediately
+
             report(`Scanning node: ${node.shortName} (${node.ip})`)
 
             // ── Connectivity pre-check for manually added nodes ──────────────
@@ -473,6 +487,7 @@ class Scanner extends EventEmitter {
             if (node.manual) this.artnet.watchIP(node.ip)
 
             for (const uniInfo of universesToScan) {
+              if (!alive()) break  // scanner stopped mid-universe-scan
               const uniLabel = `${uniInfo.net}.${uniInfo.sub}.${uniInfo.uni}`
               report(`  Discovering RDM on universe ${uniLabel} → sending to ${node.ip}:6454`)
 
@@ -670,11 +685,18 @@ class Scanner extends EventEmitter {
    */
   _pingHost(ip) {
     return new Promise((resolve) => {
-      // -c 1: send one packet  -W 1: wait 1 second (macOS/Linux)
-      // Windows: -n 1 -w 1000
-      const cmd = process.platform === 'win32'
-        ? `ping -n 1 -w 1000 ${ip}`
-        : `ping -c 1 -W 1 ${ip}`
+      // NOTE: -W semantics differ by OS:
+      //   macOS: -W <waittime_ms>   → -W 2000 = 2 seconds
+      //   Linux: -W <waittime_s>    → -W 2    = 2 seconds
+      //   Windows: -w <waittime_ms> → -w 2000 = 2 seconds
+      let cmd
+      if (process.platform === 'win32') {
+        cmd = `ping -n 1 -w 2000 ${ip}`
+      } else if (process.platform === 'darwin') {
+        cmd = `ping -c 1 -W 2000 ${ip}`   // macOS: -W in ms
+      } else {
+        cmd = `ping -c 1 -W 2 ${ip}`      // Linux: -W in s
+      }
       exec(cmd, (err) => resolve(!err))
     })
   }

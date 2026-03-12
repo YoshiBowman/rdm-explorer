@@ -190,7 +190,7 @@ ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0', protocol = 
 })
 
 ipcMain.handle('stop-scan', () => {
-  if (scanner) { scanner.stop(); scanner = null }
+  if (scanner) { scanner.removeAllListeners(); scanner.stop(); scanner = null }
   return { ok: true }
 })
 
