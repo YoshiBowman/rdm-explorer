@@ -518,15 +518,17 @@ class Scanner extends EventEmitter {
 
                   if (rdmnetResult.tcpConnected || rdmnetResult.llrpReplies.length > 0) {
                     report(`  [RDMnet] ✓ ${node.ip} supports E1.33 RDMnet!`)
-                    report(`           To control RDM devices on this node, use Pathscape`)
-                    report(`           (Pathway's RDMnet controller) or another E1.33 controller.`)
-                    report(`           RDM Explorer currently supports Art-Net RDM only.`)
+                    report(`           RDM Explorer can now query RDM devices through this broker.`)
                   } else {
-                    const tcpRefused = rdmnetResult.brokerData === null && !rdmnetResult.tcpConnected
-                    report(`  [RDMnet] ${node.ip} is not running E1.33 RDMnet (Art-Net RDM or E1.33).`)
-                    report(`         → This node is likely running Pathway's proprietary Pathport protocol.`)
-                    report(`         → In Pathscape: select the node → Ports → enable "Art-Net RDM" per port,`)
-                    report(`           OR switch the node's protocol mode to Art-Net if it's in Pathport mode.`)
+                    report(`  [RESULT] ${node.ip} is a Pathway Pathport node that does not support`)
+                    report(`           Art-Net RDM or E1.33 RDMnet in its current firmware.`)
+                    report(``)
+                    report(`           Pathport nodes only expose RDM via E1.33 RDMnet, which`)
+                    report(`           requires firmware v6.3.1 or newer.`)
+                    report(``)
+                    report(`           TO FIX: In Pathscape → Administration → check for firmware`)
+                    report(`           updates and upgrade these nodes to v6.3.1+. Then in each`)
+                    report(`           node's Properties panel, enable RDMnet and re-run this scan.`)
                   }
 
                   // Use the mDNS results already collected at scan start (no re-query)
