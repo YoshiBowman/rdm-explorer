@@ -7,6 +7,7 @@
 'use strict'
 
 const EventEmitter = require('events')
+const { exec }     = require('child_process')
 const ArtNet = require('./artnet')
 const SACN   = require('./sacn')
 const RDM    = require('./rdm')
@@ -57,10 +58,11 @@ class Scanner extends EventEmitter {
       })
 
       this.artnet.on('artRdmData', (data, rinfo) => {
+        // Don't null the callback here — let the callback itself decide.
+        // This prevents losing the callback when unrelated ArtRdm packets
+        // arrive from other nodes between request and response.
         if (this._pendingCallback) {
-          const cb = this._pendingCallback
-          this._pendingCallback = null
-          cb(data, rinfo)
+          this._pendingCallback(data, rinfo)
         }
       })
 
@@ -229,15 +231,17 @@ class Scanner extends EventEmitter {
         resolve(null)
       }, timeout)
 
+      // Keep the callback alive until we get a packet from the right IP
+      // or the timer fires.  Previous bug: callback was nulled before calling
+      // it, then re-assigned only once — losing it after 2 wrong-source packets.
       this._pendingCallback = (data, rinfo) => {
         if (rinfo.address === nodeIP) {
           clearTimeout(timer)
+          this._pendingCallback = null
           resolve(data)
-        } else {
-          this._pendingCallback = (d2, r2) => {
-            if (r2.address === nodeIP) { clearTimeout(timer); resolve(d2) }
-          }
         }
+        // Wrong source address — leave _pendingCallback intact so we keep
+        // waiting.  The timer will clean it up if nothing useful arrives.
       }
 
       this.artnet.sendArtRdm(nodeIP, net, sub, uni, packet)
@@ -399,6 +403,24 @@ class Scanner extends EventEmitter {
           for (const node of nodes) {
             report(`Scanning node: ${node.shortName} (${node.ip})`)
 
+            // ── Connectivity pre-check for manually added nodes ──────────────
+            // Manually added nodes never respond to ArtPoll so we can't confirm
+            // connectivity that way.  A quick ICMP ping tells us whether IP-level
+            // traffic can actually reach the node before we spend time on RDM.
+            if (node.manual) {
+              report(`  [ping] Checking connectivity to ${node.ip}…`)
+              const reachable = await this._pingHost(node.ip)
+              if (reachable) {
+                report(`  [ping] ${node.ip} is reachable ✓`)
+              } else {
+                report(`  [ping] WARNING: ${node.ip} did not respond to ping.`)
+                report(`         Packets may not be reaching this node.`)
+                report(`         Check that the Mac is on the same network segment as the node`)
+                report(`         (or that ICMP is not blocked by the switch).`)
+                report(`         RDM discovery will still be attempted.`)
+              }
+            }
+
             if (!node.supportsRDM) {
               report(`  ${node.shortName} does not appear to support RDM — skipping.`)
             }
@@ -407,9 +429,11 @@ class Scanner extends EventEmitter {
               ? node.universes
               : [{ net: 0, sub: 0, uni: 0 }]
 
+            let nodeFoundAnyDevices = false
+
             for (const uniInfo of universesToScan) {
               const uniLabel = `${uniInfo.net}.${uniInfo.sub}.${uniInfo.uni}`
-              report(`  Discovering RDM devices on universe ${uniLabel}…`)
+              report(`  Discovering RDM on universe ${uniLabel} → sending to ${node.ip}:6454`)
 
               let uids = []
               try {
@@ -424,6 +448,7 @@ class Scanner extends EventEmitter {
                 continue
               }
 
+              nodeFoundAnyDevices = true
               report(`  Found ${uids.length} RDM UID(s) on universe ${uniLabel}. Reading device info…`)
 
               for (const { uidStr, uidBuf } of uids) {
@@ -442,6 +467,18 @@ class Scanner extends EventEmitter {
                   report(`    Error reading ${uidStr}: ${e.message}`)
                 }
               }
+            }
+
+            // If node was reachable (ping) but RDM returned nothing, give a hint
+            if (node.manual && !nodeFoundAnyDevices) {
+              report(`  NOTE: No RDM devices found on ${node.shortName}.`)
+              report(`        Possible causes:`)
+              report(`        1. Node not reachable via Art-Net UDP (check NIC / VLAN)`)
+              report(`        2. Node does not support Art-Net RDM passthrough (Pathport`)
+              report(`           nodes use Pathway's own protocol for RDM management)`)
+              report(`        3. Universes 0–${universesToScan.length - 1} may not match this`)
+              report(`           node's Art-Net universe configuration (check Pathscape)`)
+              report(`        4. No RDM-capable fixtures are currently patched to this node`)
             }
           }
         }
@@ -485,6 +522,23 @@ class Scanner extends EventEmitter {
     } finally {
       this.running = false
     }
+  }
+
+  // ─── Network Diagnostics ─────────────────────────────────────────────────────
+
+  /**
+   * ICMP ping a host.  Returns true if the host responded, false if unreachable
+   * or if ping timed out.  Uses the OS `ping` command.
+   */
+  _pingHost(ip) {
+    return new Promise((resolve) => {
+      // -c 1: send one packet  -W 1: wait 1 second (macOS/Linux)
+      // Windows: -n 1 -w 1000
+      const cmd = process.platform === 'win32'
+        ? `ping -n 1 -w 1000 ${ip}`
+        : `ping -c 1 -W 1 ${ip}`
+      exec(cmd, (err) => resolve(!err))
+    })
   }
 
   // ─── UID Math ──────────────────────────────────────────────────────────────────

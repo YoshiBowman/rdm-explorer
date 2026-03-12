@@ -196,8 +196,10 @@ ipcMain.handle('add-manual-node', (_event, ip, name) => {
   // Validate basic IPv4 format
   if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return { ok: false, error: 'Invalid IP address' }
   if (manualNodes.find(n => n.ip === ip)) return { ok: false, error: 'Node already added' }
-  // Default to 8 universes (0–7) on net 0, sub 0 — covers a full Pathport 8-port node
-  const universes = Array.from({ length: 8 }, (_, i) => ({ net: 0, sub: 0, uni: i }))
+  // Default to 16 universes (0–15) on net 0, sub 0
+  // Covers a full Pathport 8-port node plus offset configurations.
+  // Users should check Pathscape to confirm the actual Art-Net universe mapping.
+  const universes = Array.from({ length: 16 }, (_, i) => ({ net: 0, sub: 0, uni: i }))
   manualNodes.push({ ip, name: name || `Manual Node @ ${ip}`, universes })
   return { ok: true }
 })
