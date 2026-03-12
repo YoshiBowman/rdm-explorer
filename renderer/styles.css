@@ -405,6 +405,8 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
 .proto-badge-artnet,
 .proto-badge-artnet-passive,
 .proto-badge-sacn,
+.proto-badge-rdmnet-llrp,
+.proto-badge-rdmnet-rpt,
 .card-proto-badge {
   display: inline-block;
   font-size: 9px;
@@ -428,6 +430,16 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
   background: rgba(240,168,50,0.15);
   color: var(--amber);
   border: 1px solid rgba(240,168,50,0.3);
+}
+.proto-badge-rdmnet-llrp {
+  background: rgba(155,114,245,0.15);
+  color: var(--purple);
+  border: 1px solid rgba(155,114,245,0.3);
+}
+.proto-badge-rdmnet-rpt {
+  background: rgba(246,135,179,0.15);
+  color: #f687b3;
+  border: 1px solid rgba(246,135,179,0.3);
 }
 
 /* Filters */

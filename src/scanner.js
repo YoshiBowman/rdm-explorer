@@ -260,6 +260,56 @@ class Scanner extends EventEmitter {
     })
   }
 
+  // ─── LLRP RDM Send / Receive ──────────────────────────────────────────────────
+
+  /**
+   * Send an RDM command to a device via LLRP (direct UDP, bypasses broker).
+   * @param {string} nodeIP    - Device IP
+   * @param {Buffer} nodeCID   - Device CID (16 bytes, from LLRP probe reply)
+   * @param {Buffer} packet    - RDM packet
+   * @param {number} timeout
+   */
+  async _sendAndReceiveLLRP(nodeIP, nodeCID, packet, timeout = RDM_TIMEOUT_MS) {
+    return this.rdmnet.sendLLRPRdm(nodeIP, nodeCID, packet, timeout)
+  }
+
+  // ─── RPT RDM Send / Receive ─────────────────────────────────────────────────
+
+  /**
+   * Send an RDM command through an RDMnet broker via RPT.
+   * @param {Buffer} destUID       - Target device UID (6 bytes)
+   * @param {number} destEndpoint  - Target endpoint
+   * @param {Buffer} packet        - RDM packet
+   * @param {number} timeout
+   */
+  async _sendAndReceiveRPT(destUID, destEndpoint, packet, timeout = RDM_TIMEOUT_MS) {
+    const broker = this.rdmnet.getConnectedBroker()
+    if (!broker) return null
+    return this.rdmnet.sendRPTRdm(broker.ip, destUID, destEndpoint, packet, timeout)
+  }
+
+  // ─── Multi-Transport RDM Send ───────────────────────────────────────────────
+
+  /**
+   * Send an RDM command using the best available transport.
+   * @param {string} transport  - 'artnet', 'llrp', or 'rpt'
+   * @param {object} ctx        - Transport context (nodeIP, net, sub, uni, nodeCID, destUID, endpoint)
+   * @param {Buffer} packet     - RDM packet
+   * @param {number} timeout
+   */
+  async _sendRDM(transport, ctx, packet, timeout = RDM_TIMEOUT_MS) {
+    switch (transport) {
+      case 'artnet':
+        return this._sendAndReceive(ctx.nodeIP, ctx.net, ctx.sub, ctx.uni, packet, timeout)
+      case 'llrp':
+        return this._sendAndReceiveLLRP(ctx.nodeIP, ctx.nodeCID, packet, timeout)
+      case 'rpt':
+        return this._sendAndReceiveRPT(ctx.destUID, ctx.endpoint, packet, timeout)
+      default:
+        return null
+    }
+  }
+
   // ─── RDM Discovery (Binary Tree) ──────────────────────────────────────────────
 
   async discoverRDMDevices(nodeIP, net, sub, uni) {
@@ -306,6 +356,100 @@ class Scanner extends EventEmitter {
         await this._discoveryBranch(nodeIP, net, sub, uni, midPlus, upper, found, depth + 1)
       }
     }
+  }
+
+  // ─── Transport-Aware RDM Discovery ──────────────────────────────────────────
+
+  /**
+   * Discover RDM devices using a specific transport.
+   * @param {string} transport - 'llrp' or 'rpt'
+   * @param {object} ctx       - Transport context
+   * @returns {Promise<Array<{ uidStr, uidBuf }>>}
+   */
+  async discoverRDMDevicesVia(transport, ctx) {
+    const found = new Map()
+
+    const unMuteAll = RDM.buildDiscUnMuteAll()
+    await this._sendRDM(transport, ctx, unMuteAll, 200)
+    await this._delay(80)
+
+    const lower = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+    const upper = Buffer.from([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
+
+    await this._discoveryBranchVia(transport, ctx, lower, upper, found, 0)
+    return Array.from(found.entries()).map(([uidStr, uidBuf]) => ({ uidStr, uidBuf }))
+  }
+
+  async _discoveryBranchVia(transport, ctx, lower, upper, found, depth) {
+    if (depth > 50) return
+
+    const dub      = RDM.buildDiscUniqueBranch(lower, upper)
+    const response = await this._sendRDM(transport, ctx, dub, RDM_TIMEOUT_MS)
+
+    if (!response) return
+
+    const uid = RDM.parseDiscoveryResponse(response)
+
+    if (uid) {
+      const uidStr = RDM.uidToString(uid)
+      if (!found.has(uidStr)) {
+        const mute = RDM.buildDiscMute(uid)
+        await this._sendRDM(transport, ctx, mute, 300)
+        found.set(uidStr, uid)
+        this.emit('uidFound', { uidStr, nodeIP: ctx.nodeIP || 'rpt' })
+      }
+      await this._discoveryBranchVia(transport, ctx, lower, upper, found, depth + 1)
+    } else {
+      const mid = this._midUID(lower, upper)
+      if (!mid) return
+      await this._discoveryBranchVia(transport, ctx, lower, mid, found, depth + 1)
+      const midPlus = this._incrementUID(mid)
+      if (midPlus) {
+        await this._discoveryBranchVia(transport, ctx, midPlus, upper, found, depth + 1)
+      }
+    }
+  }
+
+  /**
+   * Get device info using a specific transport.
+   * Same as getDeviceInfo but transport-agnostic.
+   */
+  async getDeviceInfoVia(transport, ctx, uidStr, uidBuf) {
+    const info = { uid: uidStr, nodeIP: ctx.nodeIP || 'rpt', net: ctx.net || 0, sub: ctx.sub || 0, uni: ctx.uni || 0 }
+
+    const _get = async (pid, pd) => {
+      const request = RDM.buildGetRequest(uidBuf, pid, pd)
+      const raw = await this._sendRDM(transport, ctx, request, RDM_TIMEOUT_MS)
+      if (!raw) return null
+      return RDM.parsePacket(raw)
+    }
+
+    const diResp = await _get(RDM.PID.DEVICE_INFO)
+    if (diResp && diResp.pd) Object.assign(info, RDM.parseDeviceInfo(diResp.pd))
+
+    const mfgResp = await _get(RDM.PID.MANUFACTURER_LABEL)
+    if (mfgResp?.pd) info.manufacturerLabel = _parseStr(mfgResp.pd)
+
+    const modelResp = await _get(RDM.PID.DEVICE_MODEL_DESCRIPTION)
+    if (modelResp?.pd) info.deviceModelDescription = _parseStr(modelResp.pd)
+
+    const labelResp = await _get(RDM.PID.DEVICE_LABEL)
+    if (labelResp?.pd) info.deviceLabel = _parseStr(labelResp.pd)
+
+    const swResp = await _get(RDM.PID.SOFTWARE_VERSION_LABEL)
+    if (swResp?.pd) info.softwareVersionLabel = _parseStr(swResp.pd)
+
+    if (info.currentPersonality > 0) {
+      const pPD = Buffer.alloc(1)
+      pPD[0] = info.currentPersonality
+      const persResp = await _get(RDM.PID.DMX_PERSONALITY_DESCRIPTION, pPD)
+      if (persResp?.pd && persResp.pd.length >= 3) {
+        info.personalityName      = _parseStr(persResp.pd.slice(2))
+        info.personalityFootprint = persResp.pd.readUInt16BE(0)
+      }
+    }
+
+    return info
   }
 
   // ─── RDM GET / SET ────────────────────────────────────────────────────────────
@@ -441,6 +585,37 @@ class Scanner extends EventEmitter {
 
       if (!alive()) return allDevices  // scanner was stopped during mDNS
 
+      // ── Broker connection ────────────────────────────────────────────────
+      // If we discovered RDMnet brokers via mDNS, connect to the first one
+      // as an RPT Controller so we can send RDM through the broker later.
+      let brokerIP = null
+      if (scanArtNet && mdnsRDMnetServices.length > 0 && alive()) {
+        for (const svc of mdnsRDMnetServices) {
+          report(`[RDMnet] Connecting to broker at ${svc.ip}:${svc.port}…`)
+          try {
+            const conn = await this.rdmnet.connectBroker(svc.ip, svc.port, 5000)
+            if (conn.connected) {
+              brokerIP = svc.ip
+              report(`[RDMnet] ✓ Connected to broker at ${svc.ip} as RPT Controller`)
+              if (conn.clients.length > 0) {
+                const devices = conn.clients.filter(c => c.clientType === 2)
+                report(`[RDMnet]   Broker reports ${devices.length} RPT Device(s):`)
+                for (const c of devices) {
+                  report(`[RDMnet]     ${c.uidStr} (CID: ${c.cid.slice(0,8)}…)`)
+                }
+              }
+              break  // use first successful broker
+            } else {
+              report(`[RDMnet] Broker at ${svc.ip} rejected connection: ${conn.error}`)
+            }
+          } catch (e) {
+            report(`[RDMnet] Failed to connect to broker at ${svc.ip}: ${e.message}`)
+          }
+        }
+      }
+
+      if (!alive()) return allDevices
+
       // ── Art-Net Discovery ──────────────────────────────────────────────────
       if (scanArtNet) {
         report(`Sending ArtPoll to: ${this.broadcasts.join(', ')}${this.subnetOverride ? ` + unicast sweep of ${this.subnetOverride}.1–254` : ''}`)
@@ -459,23 +634,15 @@ class Scanner extends EventEmitter {
             report(`Scanning node: ${node.shortName} (${node.ip})`)
 
             // ── Connectivity pre-check for manually added nodes ──────────────
-            // Manually added nodes never respond to ArtPoll so we can't confirm
-            // connectivity that way.  A quick ICMP ping tells us whether IP-level
-            // traffic can actually reach the node before spending time on RDM.
             if (node.manual) {
               report(`  [ping] Checking connectivity to ${node.ip}…`)
               const reachable = await this._pingHost(node.ip)
               if (reachable) {
                 report(`  [ping] ${node.ip} is reachable ✓`)
               } else {
-                report(`  [ping] WARNING: ${node.ip} did not respond to ping — node is not`)
-                report(`         reachable from this machine.  Skipping RDM scan for this node.`)
-                report(`         FIX: Make sure this Mac has a NIC configured on the same subnet`)
-                report(`         as the node.  Open System Settings → Network, add an IP like`)
-                report(`         10.30.142.250/8 to the ethernet interface, then scan again.`)
-                report(`         (Pathscape reaches nodes via its own proprietary discovery,`)
-                report(`          which may not require standard IP routing.)`)
-                continue  // no point sending Art-Net into the void
+                report(`  [ping] WARNING: ${node.ip} did not respond to ping — skipping.`)
+                report(`         FIX: Configure a NIC on the same subnet as the node.`)
+                continue
               }
             }
 
@@ -489,15 +656,16 @@ class Scanner extends EventEmitter {
               : [{ net: 0, sub: 0, uni: 0 }]
 
             let nodeFoundAnyDevices = false
+            let nodeUsedTransport   = null  // track which transport found devices
 
-            // Start watching ALL raw UDP packets from this node so we can report
-            // whether it sends ANYTHING back (even non-Art-Net protocol packets).
+            // Start watching ALL raw UDP packets from this node (diagnostic)
             if (node.manual) this.artnet.watchIP(node.ip)
 
+            // ── Try 1: Art-Net RDM ──────────────────────────────────────────
             for (const uniInfo of universesToScan) {
-              if (!alive()) break  // scanner stopped mid-universe-scan
+              if (!alive()) break
               const uniLabel = `${uniInfo.net}.${uniInfo.sub}.${uniInfo.uni}`
-              report(`  Discovering RDM on universe ${uniLabel} → sending to ${node.ip}:6454`)
+              report(`  [Art-Net] Discovering RDM on universe ${uniLabel} → ${node.ip}:6454`)
 
               let uids = []
               try {
@@ -508,12 +676,13 @@ class Scanner extends EventEmitter {
               }
 
               if (uids.length === 0) {
-                report(`  No RDM devices found on universe ${uniLabel}.`)
+                report(`  No RDM devices on universe ${uniLabel} via Art-Net.`)
                 continue
               }
 
               nodeFoundAnyDevices = true
-              report(`  Found ${uids.length} RDM UID(s) on universe ${uniLabel}. Reading device info…`)
+              nodeUsedTransport   = 'artnet'
+              report(`  ✓ Found ${uids.length} RDM UID(s) on universe ${uniLabel} via Art-Net`)
 
               for (const { uidStr, uidBuf } of uids) {
                 report(`    Reading: ${uidStr}`)
@@ -525,6 +694,7 @@ class Scanner extends EventEmitter {
                   deviceInfo.nodeName  = node.shortName
                   deviceInfo.nodeIP    = node.ip
                   deviceInfo.protocol  = 'artnet'
+                  deviceInfo.transport = 'Art-Net RDM'
                   allDevices.push(deviceInfo)
                   this.emit('deviceFound', deviceInfo)
                 } catch (e) {
@@ -533,93 +703,171 @@ class Scanner extends EventEmitter {
               }
             }
 
-            // ── Raw-packet diagnostic ───────────────────────────────────────────
-            if (node.manual) {
-              const watch = this.artnet.stopWatchIP()
-              if (watch.count === 0) {
-                report(`  [diag] ${node.ip} sent 0 packets back during entire scan.`)
-                report(`         Node is silently ignoring Art-Net RDM (opCode 0x8002).`)
-                report(`         → Probing for E1.33 RDMnet (TCP/UDP port 5569) and mDNS…`)
+            // ── Stop diagnostic watch ──────────────────────────────────────
+            let watchResult = null
+            if (node.manual) watchResult = this.artnet.stopWatchIP()
 
-                // ── E1.33 RDMnet probe ──────────────────────────────────────────
-                try {
-                  const rdmnetResult = await this.rdmnet.probeIP(node.ip, report, 2000)
+            // ── Try 2: LLRP RDM (if Art-Net found nothing) ─────────────────
+            if (!nodeFoundAnyDevices && alive()) {
+              const llrpDev = this.rdmnet.getLLRPDevice(node.ip)
+              if (llrpDev) {
+                report(`  [LLRP] Art-Net RDM yielded nothing — trying LLRP RDM (CID: ${llrpDev.cid.toString('hex').slice(0,8)}…)`)
 
-                  if (rdmnetResult.tcpConnected || rdmnetResult.llrpReplies.length > 0) {
-                    report(`  [RDMnet] ✓ ${node.ip} supports E1.33 RDMnet!`)
-                    report(`           RDM Explorer can now query RDM devices through this broker.`)
-                  } else {
-                    // Pathport nodes with firmware 6.3.1+ and RDMnet enabled are
-                    // RDMnet COMPONENTS — they connect TO a broker (Pathscape), they
-                    // are NOT the broker themselves.  TCP 5569 will be refused on the
-                    // node IP; we need to find Pathscape's IP instead.
-                    report(`  [RESULT] ${node.ip} — Pathport node did not respond to Art-Net RDM`)
-                    report(`           and is not itself an RDMnet broker (TCP ${RDMNET_PORT} refused).`)
-                    report(``)
-                    report(`           If firmware ≥ v6.3.1 and "E1.33 RDMnet (Unsecured)" is set`)
-                    report(`           in Pathscape node Properties, the node is an RDMnet COMPONENT`)
-                    report(`           that connects TO Pathscape. Pathscape is the broker.`)
-                    report(``)
+                for (const uniInfo of universesToScan) {
+                  if (!alive()) break
+                  const uniLabel = `${uniInfo.net}.${uniInfo.sub}.${uniInfo.uni}`
+                  const ctx = { nodeIP: node.ip, nodeCID: llrpDev.cid, net: uniInfo.net, sub: uniInfo.sub, uni: uniInfo.uni }
 
-                    // Probe local machine IPs — if Pathscape is running here, port
-                    // 5569 will be open on one of these addresses.
-                    const localIPs = _getLocalIPsOnSameOctet(node.ip)
-                    if (localIPs.length > 0) {
-                      report(`  [RDMnet] Probing local machine for Pathscape broker on ${localIPs.join(', ')}…`)
-                      let pathscapeFound = false
-                      for (const localIP of localIPs) {
-                        let tcpCheck
-                        try {
-                          tcpCheck = await this.rdmnet.probeTCP(localIP, 1500)
-                        } catch (_) {
-                          tcpCheck = { connected: false }
-                        }
-                        if (tcpCheck.connected) {
-                          report(`  [RDMnet] ✓ Pathscape RDMnet broker found at ${localIP}:${RDMNET_PORT}!`)
-                          report(`           RDM Explorer can reach RDM devices through Pathscape.`)
-                          report(`           (Full RDMnet support via Pathscape coming in a future update.)`)
-                          pathscapeFound = true
-                          break
-                        }
-                      }
-                      if (!pathscapeFound) {
-                        report(`  [RDMnet] Pathscape broker not found on local IPs.`)
-                        report(`           Make sure Pathscape is open and RDMnet is enabled in`)
-                        report(`           Pathscape → Preferences, then re-run this scan.`)
-                      }
-                    } else {
-                      report(`  [RDMnet] No local IP found on same subnet as ${node.ip}.`)
-                      report(`           Connect this Mac to the lighting network and re-scan.`)
+                  let uids = []
+                  try {
+                    uids = await this.discoverRDMDevicesVia('llrp', ctx)
+                  } catch (e) {
+                    report(`  [LLRP] Error on universe ${uniLabel}: ${e.message}`)
+                    continue
+                  }
+
+                  if (uids.length === 0) continue
+
+                  nodeFoundAnyDevices = true
+                  nodeUsedTransport   = 'llrp'
+                  report(`  ✓ Found ${uids.length} RDM UID(s) on universe ${uniLabel} via LLRP`)
+
+                  for (const { uidStr, uidBuf } of uids) {
+                    report(`    Reading: ${uidStr}`)
+                    try {
+                      const deviceInfo = await this.getDeviceInfoVia('llrp', ctx, uidStr, uidBuf)
+                      deviceInfo.universe  = uniLabel
+                      deviceInfo.nodeName  = node.shortName
+                      deviceInfo.nodeIP    = node.ip
+                      deviceInfo.protocol  = 'rdmnet-llrp'
+                      deviceInfo.transport = 'LLRP RDM'
+                      allDevices.push(deviceInfo)
+                      this.emit('deviceFound', deviceInfo)
+                    } catch (e) {
+                      report(`    Error reading ${uidStr}: ${e.message}`)
                     }
                   }
-
-                  // Use the mDNS results already collected at scan start (no re-query)
-                  if (mdnsRDMnetServices.length > 0) {
-                    report(`  [RDMnet] RDMnet brokers found earlier via mDNS: ${mdnsRDMnetServices.map(s => s.ip).join(', ')}`)
-                  }
-
-                } catch (rdmnetErr) {
-                  report(`  [RDMnet] Probe error: ${rdmnetErr.message}`)
                 }
 
+                if (!nodeFoundAnyDevices) {
+                  report(`  [LLRP] No RDM devices found via LLRP.`)
+                }
+              }
+            }
+
+            // ── Try 3: RPT through broker (if LLRP also found nothing) ──────
+            if (!nodeFoundAnyDevices && brokerIP && alive()) {
+              report(`  [RPT] Trying RDM discovery through broker at ${brokerIP}…`)
+
+              // Find the RPT Device entry for this node in the broker's client list
+              const brokerClients = this.rdmnet.getBrokerClients(brokerIP)
+              // Try to match by IP or just try all device clients
+              // RPT devices are identified by UID, not IP — try each device's endpoints
+              const devicesToTry = brokerClients.length > 0 ? brokerClients : []
+
+              if (devicesToTry.length === 0) {
+                // No RPT devices known — try sending RDM to broadcast UID on sequential endpoints
+                report(`  [RPT] No RPT Devices reported by broker — trying discovery on endpoints 1-8…`)
+                const broadcastUID = Buffer.from([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
+
+                for (let ep = 1; ep <= 8; ep++) {
+                  if (!alive()) break
+                  const ctx = { destUID: broadcastUID, endpoint: ep, nodeIP: node.ip }
+                  let uids = []
+                  try {
+                    uids = await this.discoverRDMDevicesVia('rpt', ctx)
+                  } catch (_) { continue }
+
+                  if (uids.length > 0) {
+                    nodeFoundAnyDevices = true
+                    nodeUsedTransport   = 'rpt'
+                    report(`  ✓ Found ${uids.length} RDM UID(s) on endpoint ${ep} via RPT broker`)
+
+                    for (const { uidStr, uidBuf } of uids) {
+                      report(`    Reading: ${uidStr}`)
+                      try {
+                        const deviceInfo = await this.getDeviceInfoVia('rpt', ctx, uidStr, uidBuf)
+                        deviceInfo.universe  = `EP${ep}`
+                        deviceInfo.nodeName  = node.shortName
+                        deviceInfo.nodeIP    = node.ip
+                        deviceInfo.protocol  = 'rdmnet-rpt'
+                        deviceInfo.transport = 'RPT (broker)'
+                        allDevices.push(deviceInfo)
+                        this.emit('deviceFound', deviceInfo)
+                      } catch (e) {
+                        report(`    Error reading ${uidStr}: ${e.message}`)
+                      }
+                    }
+                  }
+                }
               } else {
-                report(`  [diag] Received ${watch.count} packet(s) from ${node.ip} during scan:`)
-                for (const s of watch.samples) {
+                // Try each known RPT Device's endpoints
+                for (const dev of devicesToTry) {
+                  if (!alive()) break
+                  const devUID = Buffer.from(dev.uid, 'hex')
+                  report(`  [RPT] Trying device ${dev.uidStr} via broker…`)
+
+                  for (let ep = 1; ep <= 8; ep++) {
+                    if (!alive()) break
+                    const ctx = { destUID: devUID, endpoint: ep, nodeIP: node.ip }
+
+                    let uids = []
+                    try {
+                      uids = await this.discoverRDMDevicesVia('rpt', ctx)
+                    } catch (_) { continue }
+
+                    if (uids.length > 0) {
+                      nodeFoundAnyDevices = true
+                      nodeUsedTransport   = 'rpt'
+                      report(`  ✓ Found ${uids.length} RDM UID(s) on ${dev.uidStr} endpoint ${ep} via RPT`)
+
+                      for (const { uidStr, uidBuf } of uids) {
+                        report(`    Reading: ${uidStr}`)
+                        try {
+                          const deviceInfo = await this.getDeviceInfoVia('rpt', ctx, uidStr, uidBuf)
+                          deviceInfo.universe  = `EP${ep}`
+                          deviceInfo.nodeName  = node.shortName
+                          deviceInfo.nodeIP    = node.ip
+                          deviceInfo.protocol  = 'rdmnet-rpt'
+                          deviceInfo.transport = 'RPT (broker)'
+                          allDevices.push(deviceInfo)
+                          this.emit('deviceFound', deviceInfo)
+                        } catch (e) {
+                          report(`    Error reading ${uidStr}: ${e.message}`)
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              if (!nodeFoundAnyDevices) {
+                report(`  [RPT] No RDM devices found via broker.`)
+              }
+            }
+
+            // ── Diagnostic summary for manual nodes ────────────────────────
+            if (node.manual && !nodeFoundAnyDevices) {
+              if (watchResult && watchResult.count === 0) {
+                report(`  [diag] ${node.ip} sent 0 Art-Net packets back.`)
+              }
+              if (watchResult && watchResult.count > 0) {
+                report(`  [diag] Received ${watchResult.count} packet(s) from ${node.ip}:`)
+                for (const s of (watchResult.samples || [])) {
                   const proto = s.isArtNet
                     ? `Art-Net opCode 0x${(s.opCode || 0).toString(16).toUpperCase().padStart(4, '0')}`
                     : `NON-Art-Net`
                   report(`    ${s.len} bytes  ${proto}  header: ${s.header}`)
                 }
-                if (watch.samples.some(s => !s.isArtNet)) {
-                  report(`  [diag] ⚠ Non-Art-Net packets detected — node is responding with`)
-                  report(`         a proprietary protocol. Copy this log and share it for analysis.`)
-                }
+              }
+              report(`  NOTE: No RDM devices found on ${node.shortName} via any transport.`)
+              if (!brokerIP && mdnsRDMnetServices.length === 0) {
+                report(`         Ensure Pathscape is open with RDMnet enabled, then re-scan.`)
               }
             }
 
-            // Node was reachable but RDM returned nothing — give specific hints
-            if (node.manual && !nodeFoundAnyDevices) {
-              report(`  NOTE: No RDM devices found on ${node.shortName}.`)
+            if (nodeUsedTransport) {
+              report(`  Transport used: ${nodeUsedTransport}`)
             }
           }
         }

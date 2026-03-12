@@ -52,6 +52,26 @@ const VECTOR_RPT_NOTIFICATION = 0x00000003
 // RDM inside LLRP vector
 const VECTOR_RDM_CMD_RD_DATA = 0x01
 
+// Broker vectors
+const VECTOR_BROKER_CONNECT             = 0x00000001
+const VECTOR_BROKER_CONNECT_REPLY       = 0x00000002
+const VECTOR_BROKER_CLIENT_ENTRY_RPT    = 0x00000001
+const VECTOR_BROKER_CONNECTED_CLIENT_LIST = 0x00000006
+const VECTOR_BROKER_CLIENT_ADD          = 0x00000007
+const VECTOR_BROKER_CLIENT_REMOVE       = 0x00000008
+const VECTOR_BROKER_CLIENT_ENTRY_CHANGE = 0x00000009
+
+// RPT request/notification sub-vectors
+const VECTOR_REQUEST_RDM_CMD            = 0x00000001
+const VECTOR_NOTIFICATION_RDM_CMD       = 0x00000001
+
+// Broker Connect Reply status codes
+const BROKER_OK               = 0x0000
+const BROKER_SCOPE_NOT_FOUND  = 0x0001
+
+// E1.33 protocol version
+const E133_VERSION = 0x0001
+
 // Connection state
 const CONN_IDLE         = 'idle'
 const CONN_CONNECTING   = 'connecting'
@@ -163,6 +183,124 @@ function buildLLRPProbeRequest(cid) {
   return Buffer.concat([pre, rootPDU])
 }
 
+// ─── LLRP RDM Command ────────────────────────────────────────────────────────
+
+/**
+ * Build an LLRP RDM Command PDU.
+ * Wraps a standard RDM packet inside LLRP for direct device communication
+ * bypassing the broker.  Sent via UDP unicast to the target device.
+ *
+ * @param {Buffer} cid       - Our CID (16 bytes)
+ * @param {Buffer} destCID   - Target device CID (16 bytes, from LLRP probe reply)
+ * @param {Buffer} rdmPacket - Complete RDM packet (starting with 0xCC)
+ */
+function buildLLRPRdmCommand(cid, destCID, rdmPacket) {
+  // LLRP layer: vector = RDM_CMD, header = destination CID, data = RDM packet
+  const llrpPDU = buildPDU(VECTOR_LLRP_RDM_CMD, destCID, rdmPacket)
+  const rootPDU = buildPDU(VECTOR_ROOT_LLRP, cid, llrpPDU)
+
+  const pre = Buffer.alloc(16)
+  pre.writeUInt16BE(0x0010, 0)
+  pre.writeUInt16BE(0x0000, 2)
+  ACN_PID.copy(pre, 4)
+
+  return Buffer.concat([pre, rootPDU])
+}
+
+// ─── Broker Connect ──────────────────────────────────────────────────────────
+
+/**
+ * Build a Broker Connect message (sent over TCP to register as RPT Controller).
+ *
+ * Structure:
+ *   Preamble (16 bytes)
+ *   Root PDU (VECTOR_ROOT_BROKER, CID)
+ *     Broker Connect PDU:
+ *       Scope (63 bytes, UTF-8 null-padded, "default")
+ *       E1.33 Version (2 bytes)
+ *       Search Domain (231 bytes, null-padded)
+ *       Connection Flags (1 byte)
+ *       Client Entry PDU:
+ *         CID (16) + UID (6) + Client Type (1) + Binding CID (16)
+ *
+ * @param {Buffer} cid - Our CID (16 bytes)
+ * @param {Buffer} uid - Our controller UID (6 bytes)
+ */
+function buildBrokerConnect(cid, uid) {
+  // Client Entry PDU data: CID + UID + ClientType + BindingCID
+  const clientData = Buffer.alloc(39)
+  cid.copy(clientData, 0)             // Client CID (16 bytes)
+  uid.copy(clientData, 16)            // Client UID (6 bytes)
+  clientData[22] = 0x01              // Client Type: RPT Controller
+  // Binding CID: zeros (bytes 23-38) — only used by devices
+
+  const clientEntry = buildPDU(VECTOR_BROKER_CLIENT_ENTRY_RPT, Buffer.alloc(0), clientData)
+
+  // Broker Connect header: Scope(63) + Version(2) + SearchDomain(231) + Flags(1) = 297 bytes
+  const connectHeader = Buffer.alloc(297)
+  Buffer.from('default').copy(connectHeader, 0)    // Scope (null-terminated, padded)
+  connectHeader.writeUInt16BE(E133_VERSION, 63)    // E1.33 Version
+  // Search Domain (231 bytes): default = empty (all zeros)
+  connectHeader[296] = 0x00                        // Connection Flags: 0 = none
+
+  const brokerPDU = buildPDU(VECTOR_BROKER_CONNECT, connectHeader, clientEntry)
+  const rootPDU   = buildPDU(VECTOR_ROOT_BROKER, cid, brokerPDU)
+
+  const pre = Buffer.alloc(16)
+  pre.writeUInt16BE(0x0010, 0)
+  pre.writeUInt16BE(0x0000, 2)
+  ACN_PID.copy(pre, 4)
+
+  return Buffer.concat([pre, rootPDU])
+}
+
+// ─── RPT Request ─────────────────────────────────────────────────────────────
+
+/**
+ * Build an RPT Request PDU containing an RDM command.
+ * Sent over TCP through a broker connection.
+ *
+ * @param {Buffer} cid          - Our CID (16 bytes)
+ * @param {Buffer} srcUID       - Our controller UID (6 bytes)
+ * @param {Buffer} destUID      - Target device UID (6 bytes)
+ * @param {number} destEndpoint - Target endpoint (0 = device, 1+ = physical port)
+ * @param {number} seqNum       - Sequence number (uint32)
+ * @param {Buffer} rdmPacket    - Complete RDM packet
+ */
+function buildRPTRequest(cid, srcUID, destUID, destEndpoint, seqNum, rdmPacket) {
+  // RPT header: srcUID(6) + srcEndpoint(2) + destUID(6) + destEndpoint(2) + seqNum(4) = 20 bytes
+  const rptHeader = Buffer.alloc(20)
+  srcUID.copy(rptHeader, 0)                      // Source UID
+  rptHeader.writeUInt16BE(0, 6)                   // Source Endpoint (0 = controller)
+  destUID.copy(rptHeader, 8)                      // Destination UID
+  rptHeader.writeUInt16BE(destEndpoint, 14)       // Destination Endpoint
+  rptHeader.writeUInt32BE(seqNum, 16)             // Sequence Number
+
+  // RDM Command PDU (nested inside RPT Request)
+  const rdmCmdPDU = buildPDU(VECTOR_REQUEST_RDM_CMD, Buffer.alloc(0), rdmPacket)
+
+  const rptPDU  = buildPDU(VECTOR_RPT_REQUEST, rptHeader, rdmCmdPDU)
+  const rootPDU = buildPDU(VECTOR_ROOT_RPT, cid, rptPDU)
+
+  const pre = Buffer.alloc(16)
+  pre.writeUInt16BE(0x0010, 0)
+  pre.writeUInt16BE(0x0000, 2)
+  ACN_PID.copy(pre, 4)
+
+  return Buffer.concat([pre, rootPDU])
+}
+
+/**
+ * Generate a 6-byte RDM UID for this controller instance.
+ * Uses ESTA manufacturer ID 0x7FF0 (prototype/development).
+ */
+function makeUID() {
+  const buf = Buffer.alloc(6)
+  buf.writeUInt16BE(0x7FF0, 0)
+  for (let i = 2; i < 6; i++) buf[i] = Math.floor(Math.random() * 256)
+  return buf
+}
+
 // ─── Parse incoming packets ───────────────────────────────────────────────────
 
 /**
@@ -214,12 +352,99 @@ function parseACNPacket(buf) {
       result.type = 'llrp_probe_request'
     } else if (llrpVec === VECTOR_LLRP_RDM_CMD) {
       result.type = 'llrp_rdm_cmd'
-      result.rdmData = llrpData.slice(1) // skip the sub-vector byte
+      // LLRP RDM CMD: header = destination CID (16 bytes), data = RDM packet
+      if (llrpData.length > 16) {
+        result.destCID = llrpData.slice(0, 16).toString('hex')
+        result.rdmData = llrpData.slice(16)
+      } else {
+        result.rdmData = llrpData
+      }
+    }
+  }
+
+  // Parse Broker layer
+  if (rootVec === VECTOR_ROOT_BROKER && childBuf.length >= 6) {
+    const brokerLen = ((childBuf[0] & 0x0F) << 8) | childBuf[1]
+    const brokerVec = childBuf.readUInt32BE(2)
+    const brokerData = childBuf.slice(6, brokerLen)
+
+    if (brokerVec === VECTOR_BROKER_CONNECT_REPLY) {
+      result.type = 'broker_connect_reply'
+      // Connect Reply data: Connection Code (2 bytes) + E1.33 Version (2 bytes)
+      // + Broker UID (6 bytes) + Client UID (6 bytes)
+      if (brokerData.length >= 2) {
+        result.connectionCode = brokerData.readUInt16BE(0)
+        result.connected = (result.connectionCode === BROKER_OK)
+      }
+      if (brokerData.length >= 4) result.brokerVersion = brokerData.readUInt16BE(2)
+      if (brokerData.length >= 10) result.brokerUID = brokerData.slice(4, 10).toString('hex').toUpperCase()
+      if (brokerData.length >= 16) result.clientUID = brokerData.slice(10, 16).toString('hex').toUpperCase()
+    } else if (brokerVec === VECTOR_BROKER_CONNECTED_CLIENT_LIST ||
+               brokerVec === VECTOR_BROKER_CLIENT_ADD) {
+      result.type = brokerVec === VECTOR_BROKER_CLIENT_ADD ? 'broker_client_add' : 'broker_client_list'
+      result.clients = _parseBrokerClientEntries(brokerData)
+    } else if (brokerVec === VECTOR_BROKER_CLIENT_REMOVE) {
+      result.type = 'broker_client_remove'
+      result.clients = _parseBrokerClientEntries(brokerData)
+    }
+  }
+
+  // Parse RPT layer
+  if (rootVec === VECTOR_ROOT_RPT && childBuf.length >= 6) {
+    const rptLen = ((childBuf[0] & 0x0F) << 8) | childBuf[1]
+    const rptVec = childBuf.readUInt32BE(2)
+    // RPT header: srcUID(6) + srcEndpoint(2) + destUID(6) + destEndpoint(2) + seqNum(4) = 20 bytes
+    const rptBody = childBuf.slice(6, rptLen)
+
+    if (rptBody.length >= 20) {
+      result.srcUID       = rptBody.slice(0, 6).toString('hex').toUpperCase()
+      result.srcEndpoint  = rptBody.readUInt16BE(6)
+      result.destUID      = rptBody.slice(8, 14).toString('hex').toUpperCase()
+      result.destEndpoint = rptBody.readUInt16BE(14)
+      result.seqNum       = rptBody.readUInt32BE(16)
+
+      const rptPayload = rptBody.slice(20)
+
+      if (rptVec === VECTOR_RPT_NOTIFICATION && rptPayload.length >= 6) {
+        result.type = 'rpt_notification'
+        // Parse nested RDM Command PDU: flags+length(2) + vector(4) + data
+        const innerLen = ((rptPayload[0] & 0x0F) << 8) | rptPayload[1]
+        result.rdmData = rptPayload.slice(6, innerLen)
+      } else if (rptVec === VECTOR_RPT_STATUS) {
+        result.type = 'rpt_status'
+        if (rptPayload.length >= 6) {
+          result.statusCode = rptPayload.readUInt32BE(2)
+        }
+      } else if (rptVec === VECTOR_RPT_REQUEST) {
+        result.type = 'rpt_request'
+      }
     }
   }
 
   return result
   } catch (_) { return null }
+}
+
+/** Parse Client Entry PDUs from Broker messages */
+function _parseBrokerClientEntries(data) {
+  const entries = []
+  let off = 0
+  while (off + 6 <= data.length) {
+    const entryLen = ((data[off] & 0x0F) << 8) | data[off + 1]
+    if (entryLen < 6 || off + entryLen > data.length) break
+    const entryData = data.slice(off + 6, off + entryLen)  // skip flags+length+vector
+    if (entryData.length >= 39) {
+      entries.push({
+        cid:        entryData.slice(0, 16).toString('hex'),
+        uid:        entryData.slice(16, 22).toString('hex').toUpperCase(),
+        uidStr:     `${entryData.slice(16, 18).toString('hex').toUpperCase()}:${entryData.slice(18, 22).toString('hex').toUpperCase()}`,
+        clientType: entryData[22],  // 1=Controller, 2=Device
+        bindingCID: entryData.slice(23, 39).toString('hex'),
+      })
+    }
+    off += entryLen
+  }
+  return entries
 }
 
 // ─── TCP frame handling ───────────────────────────────────────────────────────
@@ -265,9 +490,12 @@ class RDMnet extends EventEmitter {
   constructor() {
     super()
     this.cid         = makeCID()
+    this.uid         = makeUID()
     this.socket      = null   // UDP for LLRP
-    this.tcpSockets  = new Map()  // ip → { socket, state, buf }
+    this.tcpSockets  = new Map()  // ip → { socket, state, buf, callbacks }
     this._brokers    = new Map()  // ip → broker info
+    this._rptSeq     = 1          // RPT sequence number counter
+    this._llrpDevices = new Map() // ip → { cid (Buffer), uid, uidStr }
   }
 
   // ─── LLRP UDP Probe ────────────────────────────────────────────────────────
@@ -283,12 +511,24 @@ class RDMnet extends EventEmitter {
       this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
 
       this.socket.on('message', (msg, rinfo) => {
-        const pkt = parseACNPacket(msg)
-        if (!pkt) return
+        try {
+          const pkt = parseACNPacket(msg)
+          if (!pkt) return
 
-        if (pkt.type === 'llrp_probe_reply') {
-          this.emit('llrpReply', { ip: rinfo.address, ...pkt })
-        }
+          if (pkt.type === 'llrp_probe_reply') {
+            // Cache the device's CID for later LLRP RDM commands
+            if (pkt.cid && pkt.uid) {
+              this._llrpDevices.set(rinfo.address, {
+                cid: Buffer.from(pkt.cid, 'hex'),
+                uid: pkt.uid,
+                uidStr: pkt.uidStr,
+              })
+            }
+            this.emit('llrpReply', { ip: rinfo.address, ...pkt })
+          } else if (pkt.type === 'llrp_rdm_cmd') {
+            this.emit('llrpRdmResponse', { ip: rinfo.address, ...pkt })
+          }
+        } catch (_) {}
       })
 
       this.socket.on('error', (err) => {
@@ -623,12 +863,236 @@ class RDMnet extends EventEmitter {
     return replies
   }
 
+  // ─── LLRP RDM Commands ──────────────────────────────────────────────────────
+
+  /**
+   * Get cached LLRP device info for an IP (from earlier probe replies).
+   * @param {string} ip
+   * @returns {{ cid: Buffer, uid: string, uidStr: string } | null}
+   */
+  getLLRPDevice(ip) {
+    return this._llrpDevices.get(ip) || null
+  }
+
+  /**
+   * Send an RDM command to a device via LLRP (UDP unicast, bypasses broker).
+   * @param {string} ip         - Device IP
+   * @param {Buffer} destCID    - Device CID (16 bytes)
+   * @param {Buffer} rdmPacket  - Complete RDM packet (starting with 0xCC)
+   * @param {number} timeout    - Response timeout in ms
+   * @returns {Promise<Buffer|null>} - RDM response data, or null on timeout
+   */
+  sendLLRPRdm(ip, destCID, rdmPacket, timeout = 600) {
+    return new Promise(async (resolve) => {
+      const timer = setTimeout(() => {
+        this.off('llrpRdmResponse', handler)
+        resolve(null)
+      }, timeout)
+
+      try { await this.startUDP() } catch (_) {
+        clearTimeout(timer)
+        return resolve(null)
+      }
+
+      const handler = (reply) => {
+        if (reply.ip === ip && reply.rdmData) {
+          clearTimeout(timer)
+          this.off('llrpRdmResponse', handler)
+          resolve(reply.rdmData)
+        }
+      }
+      this.on('llrpRdmResponse', handler)
+
+      const pkt = buildLLRPRdmCommand(this.cid, destCID, rdmPacket)
+      this.socket.send(pkt, 0, pkt.length, RDMNET_PORT, ip, () => {})
+    })
+  }
+
+  // ─── RPT Controller (Broker Connection) ───────────────────────────────────
+
+  /**
+   * Connect to an RDMnet broker as an RPT Controller.
+   * Sends a Broker Connect message and waits for Connect Reply.
+   *
+   * @param {string} ip           - Broker IP
+   * @param {number} [port=5569]  - Broker port
+   * @param {number} [timeoutMs=5000]
+   * @returns {Promise<{ connected: boolean, clients: Array, error?: string }>}
+   */
+  connectBroker(ip, port = RDMNET_PORT, timeoutMs = 5000) {
+    return new Promise((resolve) => {
+      if (this.tcpSockets.has(ip)) {
+        const existing = this.tcpSockets.get(ip)
+        if (existing.state === CONN_CONNECTED) return resolve({ connected: true, clients: existing.clients || [] })
+        // Clean up stale connection
+        try { existing.socket.destroy() } catch (_) {}
+        this.tcpSockets.delete(ip)
+      }
+
+      const sock = new net.Socket()
+      let rxBuf  = Buffer.alloc(0)
+      let done   = false
+      const clients = []
+      const entry = { socket: sock, state: CONN_CONNECTING, buf: rxBuf, clients, callbacks: new Map() }
+      this.tcpSockets.set(ip, entry)
+
+      const finish = (result) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        if (!result.connected) {
+          try { sock.destroy() } catch (_) {}
+          this.tcpSockets.delete(ip)
+        }
+        resolve(result)
+      }
+
+      const timer = setTimeout(() => finish({ connected: false, clients: [], error: 'timeout' }), timeoutMs)
+
+      sock.connect(port, ip, () => {
+        // Send Broker Connect message
+        const connectMsg = buildBrokerConnect(this.cid, this.uid)
+        sock.write(connectMsg)
+      })
+
+      sock.on('data', (chunk) => {
+        rxBuf = Buffer.concat([rxBuf, chunk])
+        entry.buf = rxBuf
+
+        // Parse all complete packets from the TCP stream
+        const { packets, remainder } = parseTCPStream(rxBuf)
+        rxBuf = remainder
+        entry.buf = rxBuf
+
+        for (const pkt of packets) {
+          if (pkt.type === 'broker_connect_reply') {
+            if (pkt.connected) {
+              entry.state = CONN_CONNECTED
+              this._brokers.set(ip, { uid: pkt.brokerUID, version: pkt.brokerVersion })
+              this.emit('brokerConnected', { ip, brokerUID: pkt.brokerUID })
+              // Don't finish yet — wait briefly for client list
+              setTimeout(() => {
+                if (!done) finish({ connected: true, clients: entry.clients })
+              }, 500)
+            } else {
+              finish({ connected: false, clients: [], error: `broker rejected: code ${pkt.connectionCode}` })
+            }
+          } else if (pkt.type === 'broker_client_list' || pkt.type === 'broker_client_add') {
+            for (const c of (pkt.clients || [])) {
+              if (!clients.find(e => e.uid === c.uid)) clients.push(c)
+            }
+            entry.clients = clients
+            this.emit('brokerClientUpdate', { ip, clients })
+          } else if (pkt.type === 'broker_client_remove') {
+            for (const c of (pkt.clients || [])) {
+              const idx = clients.findIndex(e => e.uid === c.uid)
+              if (idx >= 0) clients.splice(idx, 1)
+            }
+            entry.clients = clients
+          } else if (pkt.type === 'rpt_notification' || pkt.type === 'rpt_status') {
+            // Route RPT responses to pending callbacks
+            const seqKey = pkt.seqNum
+            const cb = entry.callbacks.get(seqKey)
+            if (cb) {
+              entry.callbacks.delete(seqKey)
+              cb(pkt)
+            }
+          }
+        }
+      })
+
+      sock.on('error', () => finish({ connected: false, clients: [], error: 'connection refused' }))
+      sock.on('close', () => {
+        entry.state = CONN_DISCONNECTED
+        if (!done) finish({ connected: false, clients: [], error: 'connection closed' })
+      })
+    })
+  }
+
+  /**
+   * Disconnect from a broker.
+   */
+  disconnectBroker(ip) {
+    const entry = this.tcpSockets.get(ip)
+    if (entry) {
+      try { entry.socket.destroy() } catch (_) {}
+      this.tcpSockets.delete(ip)
+    }
+    this._brokers.delete(ip)
+  }
+
+  /**
+   * Check if we have an active broker connection.
+   * @param {string} [ip] - Specific broker IP, or omit to check any
+   * @returns {{ ip: string, entry: object } | null}
+   */
+  getConnectedBroker(ip) {
+    if (ip) {
+      const entry = this.tcpSockets.get(ip)
+      return entry && entry.state === CONN_CONNECTED ? { ip, entry } : null
+    }
+    // Find any connected broker
+    for (const [brokerIP, entry] of this.tcpSockets) {
+      if (entry.state === CONN_CONNECTED) return { ip: brokerIP, entry }
+    }
+    return null
+  }
+
+  /**
+   * Get the list of RPT Device clients reported by a connected broker.
+   * @param {string} ip - Broker IP
+   * @returns {Array} - Client entries with { cid, uid, uidStr, clientType }
+   */
+  getBrokerClients(ip) {
+    const entry = this.tcpSockets.get(ip)
+    return entry ? (entry.clients || []).filter(c => c.clientType === 2) : []  // type 2 = Device
+  }
+
+  /**
+   * Send an RDM command through a broker via RPT.
+   *
+   * @param {string} brokerIP      - Broker IP we're connected to
+   * @param {Buffer} destUID       - Target device UID (6 bytes)
+   * @param {number} destEndpoint  - Target endpoint (0 = device, 1+ = port)
+   * @param {Buffer} rdmPacket     - Complete RDM packet
+   * @param {number} timeout       - Response timeout in ms
+   * @returns {Promise<Buffer|null>} - RDM response data, or null on timeout
+   */
+  sendRPTRdm(brokerIP, destUID, destEndpoint, rdmPacket, timeout = 800) {
+    return new Promise((resolve) => {
+      const entry = this.tcpSockets.get(brokerIP)
+      if (!entry || entry.state !== CONN_CONNECTED) return resolve(null)
+
+      const seq = this._rptSeq++
+      const timer = setTimeout(() => {
+        entry.callbacks.delete(seq)
+        resolve(null)
+      }, timeout)
+
+      entry.callbacks.set(seq, (pkt) => {
+        clearTimeout(timer)
+        resolve(pkt.rdmData || null)
+      })
+
+      const pktBuf = buildRPTRequest(this.cid, this.uid, destUID, destEndpoint, seq, rdmPacket)
+      try {
+        entry.socket.write(pktBuf)
+      } catch (_) {
+        clearTimeout(timer)
+        entry.callbacks.delete(seq)
+        resolve(null)
+      }
+    })
+  }
+
   destroy() {
     this.stopUDP()
-    for (const { socket } of this.tcpSockets.values()) {
-      try { socket.destroy() } catch (_) {}
+    for (const [ip, entry] of this.tcpSockets) {
+      try { entry.socket.destroy() } catch (_) {}
     }
     this.tcpSockets.clear()
+    this._brokers.clear()
+    this._llrpDevices.clear()
   }
 }
 

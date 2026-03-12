@@ -495,7 +495,10 @@ function buildCard(device) {
   const foot  = device.dmxFootprint != null    ? String(device.dmxFootprint)    : '—'
   const pers  = device.personalityName         || (device.currentPersonality ? `Mode ${device.currentPersonality}` : '—')
   const cat   = device.productCategoryName     || 'Fixture'
-  const proto = device.protocol === 'sacn' ? 'sACN' : 'Art-Net'
+  const proto = device.protocol === 'sacn' ? 'sACN'
+              : device.protocol === 'rdmnet-llrp' ? 'LLRP'
+              : device.protocol === 'rdmnet-rpt' ? 'RPT'
+              : 'Art-Net'
 
   const catClass = categoryClass(cat)
 
@@ -560,7 +563,11 @@ function populateModal(device) {
     ['Sensors',            device.sensorCount],
     ['Node',               device.nodeName ? `${device.nodeName} (${device.nodeIP})` : device.nodeIP],
     ['Universe',           device.universe],
-    ['Protocol',           device.protocol === 'sacn' ? 'sACN (E1.31)' : 'Art-Net'],
+    ['Protocol',           device.protocol === 'sacn' ? 'sACN (E1.31)'
+                           : device.protocol === 'rdmnet-llrp' ? 'RDMnet (LLRP)'
+                           : device.protocol === 'rdmnet-rpt' ? 'RDMnet (RPT/Broker)'
+                           : 'Art-Net'],
+    ['Transport',          device.transport],
   ]
 
   document.getElementById('modalInfoList').innerHTML = items
