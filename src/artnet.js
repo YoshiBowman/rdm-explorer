@@ -230,7 +230,9 @@ class ArtNet extends EventEmitter {
       universes,
       supportsRDM,
       status1,
-      rawMsg: msg
+      // rawMsg intentionally omitted — the raw Buffer is wasteful to send over
+      // Electron IPC (229 bytes per node, serialized by sanitize()) and the UI
+      // has no use for it.
     }
   }
 }

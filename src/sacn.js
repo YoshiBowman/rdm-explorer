@@ -56,7 +56,16 @@ class SACN extends EventEmitter {
       this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
 
       this.socket.on('message', (msg, rinfo) => this._handleMessage(msg, rinfo))
-      this.socket.on('error', (err) => this.emit('error', err))
+
+      // IMPORTANT: reject() must be called here so that scanner.js's
+      // try/catch catches the failure when port 5568 is already in use
+      // (e.g. another sACN consumer on the same machine).
+      // After the Promise resolves (bind succeeds) reject() becomes a no-op,
+      // and the emitted error is still propagated to the scanner's listener.
+      this.socket.on('error', (err) => {
+        reject(err)             // reject start() Promise if bind/early error fires
+        this.emit('error', err) // also propagate for errors after successful start
+      })
 
       this.socket.bind(SACN_PORT, () => {
         // Gather all non-internal IPv4 addresses so we can join multicast
@@ -164,9 +173,14 @@ class SACN extends EventEmitter {
 
     const sourceName = msg.slice(44, 108).toString('utf8').replace(/\0/g, '').trim()
 
-    // Universe Discovery layer: page at 118, last page at 119, list starts at 120
+    // E1.31-2018 Universe Discovery Layer PDU (Table 8-9):
+    //   Byte 115-116: Flags+Length
+    //   Byte 117-120: Vector = VECTOR_UNIVERSE_DISCOVERY_LIST (0x00000001)
+    //   Byte 121:     Page
+    //   Byte 122:     Last Page
+    //   Byte 123+:    Universe list (2 bytes each, big-endian)
     const universes = []
-    for (let i = 120; i + 1 < msg.length; i += 2) {
+    for (let i = 123; i + 1 < msg.length; i += 2) {
       const uni = msg.readUInt16BE(i)
       if (uni > 0 && uni <= 63999) {
         universes.push(uni)

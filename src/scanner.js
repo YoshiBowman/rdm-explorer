@@ -139,6 +139,7 @@ class Scanner extends EventEmitter {
       const parts = this.subnetOverride.split('.')
       if (parts.length === 3) {
         for (let h = 1; h <= 254; h++) {
+          if (!this.running) break  // abort if scanner was stopped
           this.artnet.sendArtPoll(`${this.subnetOverride}.${h}`)
           if (h % 50 === 0) await this._delay(10)
         }
