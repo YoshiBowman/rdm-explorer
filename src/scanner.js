@@ -8,6 +8,7 @@
 
 const EventEmitter = require('events')
 const { exec }     = require('child_process')
+const os       = require('os')
 const ArtNet   = require('./artnet')
 const SACN     = require('./sacn')
 const RDM      = require('./rdm')
@@ -392,6 +393,11 @@ class Scanner extends EventEmitter {
     try {
       const allDevices = []
 
+      // Emit a timestamped scan header so each scan is clearly delimited in the log
+      report(`──────────────────────────────────────────────────────`)
+      report(`Scan started: ${new Date().toLocaleString()}`)
+      report(`──────────────────────────────────────────────────────`)
+
       // ── mDNS RDMnet pre-scan (once, before per-node work) ─────────────────
       // Run this early so results are ready to display per-node without
       // re-querying the network 4 times.
@@ -520,15 +526,48 @@ class Scanner extends EventEmitter {
                     report(`  [RDMnet] ✓ ${node.ip} supports E1.33 RDMnet!`)
                     report(`           RDM Explorer can now query RDM devices through this broker.`)
                   } else {
-                    report(`  [RESULT] ${node.ip} is a Pathway Pathport node that does not support`)
-                    report(`           Art-Net RDM or E1.33 RDMnet in its current firmware.`)
+                    // Pathport nodes with firmware 6.3.1+ and RDMnet enabled are
+                    // RDMnet COMPONENTS — they connect TO a broker (Pathscape), they
+                    // are NOT the broker themselves.  TCP 5569 will be refused on the
+                    // node IP; we need to find Pathscape's IP instead.
+                    report(`  [RESULT] ${node.ip} — Pathport node did not respond to Art-Net RDM`)
+                    report(`           and is not itself an RDMnet broker (TCP ${RDMNET_PORT} refused).`)
                     report(``)
-                    report(`           Pathport nodes only expose RDM via E1.33 RDMnet, which`)
-                    report(`           requires firmware v6.3.1 or newer.`)
+                    report(`           If firmware ≥ v6.3.1 and "E1.33 RDMnet (Unsecured)" is set`)
+                    report(`           in Pathscape node Properties, the node is an RDMnet COMPONENT`)
+                    report(`           that connects TO Pathscape. Pathscape is the broker.`)
                     report(``)
-                    report(`           TO FIX: In Pathscape → Administration → check for firmware`)
-                    report(`           updates and upgrade these nodes to v6.3.1+. Then in each`)
-                    report(`           node's Properties panel, enable RDMnet and re-run this scan.`)
+
+                    // Probe local machine IPs — if Pathscape is running here, port
+                    // 5569 will be open on one of these addresses.
+                    const localIPs = _getLocalIPsOnSameOctet(node.ip)
+                    if (localIPs.length > 0) {
+                      report(`  [RDMnet] Probing local machine for Pathscape broker on ${localIPs.join(', ')}…`)
+                      let pathscapeFound = false
+                      for (const localIP of localIPs) {
+                        let tcpCheck
+                        try {
+                          tcpCheck = await this.rdmnet.probeTCP(localIP, 1500)
+                        } catch (_) {
+                          tcpCheck = { connected: false }
+                        }
+                        if (tcpCheck.connected) {
+                          report(`  [RDMnet] ✓ Pathscape RDMnet broker found at ${localIP}:${RDMNET_PORT}!`)
+                          report(`           RDM Explorer can reach RDM devices through Pathscape.`)
+                          report(`           (Full RDMnet support via Pathscape coming in a future update.)`)
+                          pathscapeFound = true
+                          break
+                        }
+                      }
+                      if (!pathscapeFound) {
+                        report(`  [RDMnet] Pathscape broker not found on local IPs.`)
+                        report(`           Make sure Pathscape is open and RDMnet is enabled in`)
+                        report(`           Pathscape → Preferences, then re-run this scan.`)
+                      }
+                    } else {
+                      report(`  [RDMnet] No local IP found on same subnet as ${node.ip}.`)
+                      report(`           Connect this Mac to the lighting network and re-scan.`)
+                    }
                   }
 
                   // Use the mDNS results already collected at scan start (no re-query)
@@ -664,5 +703,30 @@ class Scanner extends EventEmitter {
 function _parseStr(buf) {
   return buf.toString('ascii').replace(/\0/g, '').trim()
 }
+
+/**
+ * Return local IPv4 addresses that are on the same Class-A /8 subnet as the
+ * given IP (e.g. if nodeIP is 10.30.142.39, returns all local 10.x.x.x IPs).
+ * This is used to find Pathscape running on the same machine, since Pathport
+ * nodes are RDMnet components that connect TO a Pathscape broker — the broker
+ * listens on the local machine, not on the node IP.
+ */
+function _getLocalIPsOnSameOctet(nodeIP) {
+  const nodeOctet = parseInt((nodeIP || '').split('.')[0], 10)
+  if (!nodeOctet) return []
+  const result = []
+  const ifaces = os.networkInterfaces()
+  for (const addrs of Object.values(ifaces)) {
+    for (const addr of (addrs || [])) {
+      if (addr.family === 'IPv4' && !addr.internal) {
+        const localOctet = parseInt(addr.address.split('.')[0], 10)
+        if (localOctet === nodeOctet) result.push(addr.address)
+      }
+    }
+  }
+  return [...new Set(result)]
+}
+
+const RDMNET_PORT = 5569
 
 module.exports = Scanner

@@ -306,16 +306,19 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
   min-height: 0;
 }
 
-/* Scrollable top area (nodes, manual nodes, filter) */
+/* Scrollable top area (nodes, manual nodes, filter).
+   min-height:0 is essential — without it flex items default to min-height:auto
+   and refuse to shrink below content size, which breaks the scroll constraint. */
 .sidebar-top {
   flex: 1 1 auto;
-  overflow-y: auto;
+  overflow-y: scroll; /* always show scrollbar track so user knows it scrolls */
   overflow-x: hidden;
   min-height: 0;
 }
-.sidebar-top::-webkit-scrollbar { width: 4px; }
-.sidebar-top::-webkit-scrollbar-track { background: transparent; }
-.sidebar-top::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.sidebar-top::-webkit-scrollbar { width: 5px; }
+.sidebar-top::-webkit-scrollbar-track { background: rgba(255,255,255,0.03); border-radius: 3px; }
+.sidebar-top::-webkit-scrollbar-thumb { background: var(--border-h); border-radius: 3px; }
+.sidebar-top::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
 .sidebar-section {
   padding: 14px 14px 10px;
@@ -461,10 +464,11 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
 }
 .filter-select:focus { border-color: var(--accent); }
 
-/* Log — fixed height, always anchored to the bottom of the sidebar */
+/* Log — flexible height, always anchored to bottom. Uses clamp so it stays
+   usable on short windows without stealing too much from the node list. */
 .sidebar-log-section {
   flex: 0 0 auto;
-  height: 220px;
+  height: clamp(160px, 28vh, 260px);
   border-top: 1px solid var(--border);
   border-bottom: none;
   display: flex;

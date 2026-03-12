@@ -126,8 +126,11 @@ ipcMain.handle('get-network-interfaces', () => {
 // ─── Scan ─────────────────────────────────────────────────────────────────────
 
 ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0', protocol = 'both', broadcastAddress = '255.255.255.255', subnetOverride = '') => {
-  // Clean up any existing scanner
-  if (scanner) { scanner.stop(); scanner = null }
+  // Clean up any existing scanner.
+  // removeAllListeners() is critical: it prevents the OLD async scan (which may
+  // still have live timers / promises in flight) from sending stale scan-progress
+  // events into the NEW scan's log after clearAll() has run in the renderer.
+  if (scanner) { scanner.removeAllListeners(); scanner.stop(); scanner = null }
 
   // Build the list of broadcast addresses to poll.
   // If "All interfaces" is selected (0.0.0.0) enumerate every NIC's subnet broadcast
