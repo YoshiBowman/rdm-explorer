@@ -8,9 +8,10 @@
 
 const EventEmitter = require('events')
 const { exec }     = require('child_process')
-const ArtNet = require('./artnet')
-const SACN   = require('./sacn')
-const RDM    = require('./rdm')
+const ArtNet   = require('./artnet')
+const SACN     = require('./sacn')
+const RDM      = require('./rdm')
+const RDMnet   = require('./rdmnet')
 
 const POLL_WAIT_MS       = 2500   // Wait after ArtPoll for replies
 const SACN_LISTEN_MS     = 3000   // Time to listen for sACN sources
@@ -20,8 +21,9 @@ const RDM_SET_TIMEOUT_MS = 600
 class Scanner extends EventEmitter {
   constructor() {
     super()
-    this.artnet = new ArtNet()
-    this.sacn   = new SACN()
+    this.artnet  = new ArtNet()
+    this.sacn    = new SACN()
+    this.rdmnet  = new RDMnet()
     this.nodes  = new Map()        // ip → node info (Art-Net)
     this.sacnSources = new Map()   // cid → source info (sACN)
     this.dmxSources  = new Map()   // ip → passive ArtDmx source info
@@ -95,6 +97,7 @@ class Scanner extends EventEmitter {
   stop() {
     this.artnet.stop()
     this.sacn.stop()
+    this.rdmnet.destroy()
     this.dmxSources.clear()
     this.running = false
   }
@@ -483,8 +486,39 @@ class Scanner extends EventEmitter {
               if (watch.count === 0) {
                 report(`  [diag] ${node.ip} sent 0 packets back during entire scan.`)
                 report(`         Node is silently ignoring Art-Net RDM (opCode 0x8002).`)
-                report(`         → This node likely requires Pathway's own protocol or E1.33 RDMnet.`)
-                report(`         → In Pathscape, check if 'Art-Net RDM' is enabled per port.`)
+                report(`         → Probing for E1.33 RDMnet (TCP/UDP port 5569) and mDNS…`)
+
+                // ── E1.33 RDMnet probe ──────────────────────────────────────────
+                try {
+                  const rdmnetResult = await this.rdmnet.probeIP(node.ip, report, 2000)
+
+                  if (rdmnetResult.tcpConnected || rdmnetResult.llrpReplies.length > 0) {
+                    report(`  [RDMnet] ✓ ${node.ip} supports E1.33 RDMnet!`)
+                    report(`           To control RDM devices on this node, use Pathscape`)
+                    report(`           (Pathway's RDMnet controller) or another E1.33 controller.`)
+                    report(`           RDM Explorer currently supports Art-Net RDM only.`)
+                  } else {
+                    report(`  [RDMnet] No E1.33 RDMnet response from ${node.ip}.`)
+                    report(`         → In Pathscape, verify the node's IP and that RDMnet is`)
+                    report(`           enabled.  Also check if Art-Net RDM is enabled per port.`)
+                  }
+
+                  // mDNS scan for any RDMnet broker on the local network segment
+                  report(`  [RDMnet] Scanning for _rdmnet._tcp.local via mDNS (3 s)…`)
+                  const mdnsResults = await this.rdmnet.discoverMDNS(3000)
+                  if (mdnsResults.length > 0) {
+                    report(`  [RDMnet] mDNS found ${mdnsResults.length} RDMnet service(s):`)
+                    for (const svc of mdnsResults) {
+                      report(`    ${svc.name}  →  ${svc.ip}:${svc.port}`)
+                    }
+                  } else {
+                    report(`  [RDMnet] No _rdmnet._tcp.local services found via mDNS.`)
+                  }
+
+                } catch (rdmnetErr) {
+                  report(`  [RDMnet] Probe error: ${rdmnetErr.message}`)
+                }
+
               } else {
                 report(`  [diag] Received ${watch.count} packet(s) from ${node.ip} during scan:`)
                 for (const s of watch.samples) {
@@ -534,6 +568,26 @@ class Scanner extends EventEmitter {
             const unis = src.universes.map(u => `${u.net}.${u.sub}.${u.uni}`).join(', ')
             report(`  ${src.ip} — ${src.universes.length} universe(s): ${unis} (${src.packetCount} packets)`)
           }
+        }
+      }
+
+      // ── E1.33 RDMnet Broadcast Discovery ─────────────────────────────────
+      // Send LLRP broadcast probes on all local subnets to catch any RDMnet
+      // brokers that weren't found via Art-Net (e.g. Pathway LX Opto series).
+      if (scanArtNet) {
+        report('Sending E1.33 RDMnet LLRP broadcast probes…')
+        try {
+          const llrpFound = await this.rdmnet.broadcastProbe(2000)
+          if (llrpFound.length > 0) {
+            report(`Found ${llrpFound.length} RDMnet device(s) via LLRP broadcast:`)
+            for (const r of llrpFound) {
+              report(`  ${r.ip}  UID: ${r.uidStr || 'n/a'}  CID: ${r.cid || 'n/a'}`)
+            }
+          } else {
+            report('No RDMnet devices found via LLRP broadcast.')
+          }
+        } catch (e) {
+          report(`RDMnet broadcast probe error: ${e.message}`)
         }
       }
 
