@@ -284,7 +284,10 @@ class RDMnet extends EventEmitter {
         }
       })
 
-      this.socket.on('error', (err) => this.emit('error', err))
+      this.socket.on('error', (err) => {
+        // Only emit if someone is listening — otherwise swallow to prevent crash
+        if (this.listenerCount('error') > 0) this.emit('error', err)
+      })
 
       this.socket.bind(0, '0.0.0.0', () => {
         try { this.socket.setBroadcast(true) } catch (_) {}
@@ -456,12 +459,26 @@ class RDMnet extends EventEmitter {
    * @param {number}   [listenMs=2000]
    * @returns {Promise<{tcpConnected, llrpReplies, brokerData}>}
    */
-  async probeIP(ip, report, listenMs = 2000) {
+  probeIP(ip, report, listenMs = 2000) {
+    // Hard outer timeout — probeIP can NEVER exceed this no matter what
+    const HARD_LIMIT_MS = listenMs + 5000
+    const deadline = new Promise(r =>
+      setTimeout(() => r({ ip, tcpConnected: false, llrpReplies: [], brokerData: null, timedOut: true }), HARD_LIMIT_MS)
+    )
+    return Promise.race([this._doProbeIP(ip, report, listenMs), deadline])
+  }
+
+  async _doProbeIP(ip, report, listenMs) {
     const result = { ip, tcpConnected: false, llrpReplies: [], brokerData: null }
 
     // ─ TCP probe ─
     report(`  [RDMnet] TCP probe → ${ip}:${RDMNET_PORT}…`)
-    const tcpResult = await this.probeTCP(ip, 2000)
+    let tcpResult
+    try {
+      tcpResult = await this.probeTCP(ip, 2000)
+    } catch (_) {
+      tcpResult = { connected: false, reason: 'error' }
+    }
 
     if (tcpResult.connected) {
       result.tcpConnected = true
@@ -476,7 +493,10 @@ class RDMnet extends EventEmitter {
 
     // ─ LLRP UDP probe ─
     report(`  [RDMnet] Sending LLRP UDP probes → ${ip}…`)
-    const replies = await this._probeLLRP(ip, listenMs)
+    let replies = []
+    try {
+      replies = await this._probeLLRP(ip, listenMs)
+    } catch (_) {}
     result.llrpReplies = replies
 
     if (replies.length > 0) {
@@ -494,7 +514,7 @@ class RDMnet extends EventEmitter {
   async _probeLLRP(ip, listenMs) {
     const replies = []
 
-    await this.startUDP()
+    try { await this.startUDP() } catch (_) { return replies }
 
     const handler = (reply) => {
       if (reply.ip === ip) replies.push(reply)
