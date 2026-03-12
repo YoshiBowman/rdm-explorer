@@ -23,7 +23,32 @@ const OP = {
 class ArtNet extends EventEmitter {
   constructor() {
     super()
-    this.socket = null
+    this.socket    = null
+    this._watchedIP      = null  // IP to passively monitor for any response
+    this._watchedCount   = 0
+    this._watchedSamples = []    // Up to 3 raw samples stored for diagnostics
+  }
+
+  /**
+   * Start recording ALL incoming UDP packets from a specific IP.
+   * Call stopWatchIP() after the operation to get the results.
+   * Used to diagnose whether a node responds to ArtRdm at all.
+   */
+  watchIP(ip) {
+    this._watchedIP      = ip
+    this._watchedCount   = 0
+    this._watchedSamples = []
+  }
+
+  stopWatchIP() {
+    const result = {
+      count:   this._watchedCount,
+      samples: this._watchedSamples,
+    }
+    this._watchedIP      = null
+    this._watchedCount   = 0
+    this._watchedSamples = []
+    return result
   }
 
   /**
@@ -96,6 +121,25 @@ class ArtNet extends EventEmitter {
   }
 
   _handleMessage(msg, rinfo) {
+    // ── Passive raw-packet watch (diagnostic mode) ────────────────────────────
+    // Capture ALL packets from the watched IP before any filtering.
+    // This tells us whether the node is responding at all, even if it's
+    // using a non-Art-Net protocol (e.g. Pathway Pathport proprietary protocol).
+    if (this._watchedIP && rinfo.address === this._watchedIP) {
+      this._watchedCount++
+      if (this._watchedSamples.length < 4) {
+        const isArtNet = msg.length >= 8 && msg.slice(0, 8).equals(ARTNET_HEADER)
+        let opCode = null
+        if (isArtNet && msg.length >= 10) opCode = msg.readUInt16LE(8)
+        this._watchedSamples.push({
+          len:      msg.length,
+          header:   msg.slice(0, Math.min(12, msg.length)).toString('hex').toUpperCase(),
+          isArtNet,
+          opCode,
+        })
+      }
+    }
+
     // Verify Art-Net header
     if (msg.length < 10) return
     if (!msg.slice(0, 8).equals(ARTNET_HEADER)) return

@@ -435,6 +435,10 @@ class Scanner extends EventEmitter {
 
             let nodeFoundAnyDevices = false
 
+            // Start watching ALL raw UDP packets from this node so we can report
+            // whether it sends ANYTHING back (even non-Art-Net protocol packets).
+            if (node.manual) this.artnet.watchIP(node.ip)
+
             for (const uniInfo of universesToScan) {
               const uniLabel = `${uniInfo.net}.${uniInfo.sub}.${uniInfo.uni}`
               report(`  Discovering RDM on universe ${uniLabel} → sending to ${node.ip}:6454`)
@@ -473,15 +477,32 @@ class Scanner extends EventEmitter {
               }
             }
 
+            // ── Raw-packet diagnostic ───────────────────────────────────────────
+            if (node.manual) {
+              const watch = this.artnet.stopWatchIP()
+              if (watch.count === 0) {
+                report(`  [diag] ${node.ip} sent 0 packets back during entire scan.`)
+                report(`         Node is silently ignoring Art-Net RDM (opCode 0x8002).`)
+                report(`         → This node likely requires Pathway's own protocol or E1.33 RDMnet.`)
+                report(`         → In Pathscape, check if 'Art-Net RDM' is enabled per port.`)
+              } else {
+                report(`  [diag] Received ${watch.count} packet(s) from ${node.ip} during scan:`)
+                for (const s of watch.samples) {
+                  const proto = s.isArtNet
+                    ? `Art-Net opCode 0x${(s.opCode || 0).toString(16).toUpperCase().padStart(4, '0')}`
+                    : `NON-Art-Net`
+                  report(`    ${s.len} bytes  ${proto}  header: ${s.header}`)
+                }
+                if (watch.samples.some(s => !s.isArtNet)) {
+                  report(`  [diag] ⚠ Non-Art-Net packets detected — node is responding with`)
+                  report(`         a proprietary protocol. Copy this log and share it for analysis.`)
+                }
+              }
+            }
+
             // Node was reachable but RDM returned nothing — give specific hints
             if (node.manual && !nodeFoundAnyDevices) {
               report(`  NOTE: No RDM devices found on ${node.shortName}.`)
-              report(`        Possible causes:`)
-              report(`        1. Node does not support Art-Net RDM passthrough`)
-              report(`           (Pathport/LX Opto use Pathway's own RDM protocol)`)
-              report(`        2. Universes 0–${universesToScan.length - 1} may not match`)
-              report(`           this node's Art-Net universe config (check Pathscape)`)
-              report(`        3. No RDM-capable fixtures patched to this node`)
             }
           }
         }
