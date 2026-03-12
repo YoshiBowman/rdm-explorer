@@ -393,6 +393,11 @@ class RDMnet extends EventEmitter {
         clearTimeout(timer)
         clearTimeout(bindTimeout)
         sock.removeAllListeners()
+        // MUST add a no-op error handler BEFORE close().
+        // sock.close() on a socket that never finished binding emits an 'error'
+        // event asynchronously on the next tick.  With all listeners removed it
+        // would throw "Unhandled error event" → uncaughtException → crash.
+        sock.on('error', () => {})
         try { sock.close() } catch (_) {}
         resolve(result)
       }

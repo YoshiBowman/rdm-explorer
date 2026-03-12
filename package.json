@@ -1,6 +1,6 @@
 {
   "name": "rdm-explorer",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "RDM Network Device Discovery & Control for Art-Net / sACN networks",
   "main": "main.js",
   "scripts": {
