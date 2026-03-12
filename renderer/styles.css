@@ -288,8 +288,9 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
 /* ─── Layout ────────────────────────────────────────────────────────────────── */
 .layout {
   display: flex;
-  height: 100vh;
-  padding-top: var(--topbar-h);
+  height: calc(100vh - var(--topbar-h));
+  margin-top: var(--topbar-h);
+  overflow: hidden;
 }
 
 /* ─── Sidebar ───────────────────────────────────────────────────────────────── */
@@ -300,8 +301,10 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+  height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
+  min-height: 0;
 }
 .sidebar::-webkit-scrollbar { width: 4px; }
 .sidebar::-webkit-scrollbar-track { background: transparent; }
