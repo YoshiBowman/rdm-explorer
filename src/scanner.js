@@ -89,8 +89,15 @@ class Scanner extends EventEmitter {
 
         this.sacn.on('error', (err) => this.emit('error', err))
       } catch (err) {
-        // sACN may fail if port is in use — don't block the scan
-        this.emit('error', new Error(`sACN start failed: ${err.message}`))
+        // sACN start failed (e.g. port 5568 in use by Pathscape or another app).
+        // This is non-fatal — emit a progress WARNING so it shows up in the scan
+        // log, but do NOT emit 'error' (which main.js maps to scan-error and
+        // causes the renderer to think the entire scan crashed, re-enabling the
+        // Scan button while the Art-Net scan is still running in the background).
+        this.emit('progress', {
+          message: `⚠ sACN unavailable: port 5568 is already in use (${err.message}). ` +
+                   `Continuing with Art-Net only.`
+        })
       }
     }
   }

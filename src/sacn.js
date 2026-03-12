@@ -53,21 +53,30 @@ class SACN extends EventEmitter {
   start(bindAddress = '0.0.0.0') {
     return new Promise((resolve, reject) => {
       this.running = true
+      let started = false  // flips to true once bind() succeeds
+
       this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
 
       this.socket.on('message', (msg, rinfo) => this._handleMessage(msg, rinfo))
 
-      // IMPORTANT: reject() must be called here so that scanner.js's
-      // try/catch catches the failure when port 5568 is already in use
-      // (e.g. another sACN consumer on the same machine).
-      // After the Promise resolves (bind succeeds) reject() becomes a no-op,
-      // and the emitted error is still propagated to the scanner's listener.
+      // Two distinct error phases:
+      //  1. Before bind succeeds (started=false): call reject() so scanner.js's
+      //     try/catch handles it gracefully. Do NOT emit here — no 'error' listener
+      //     is registered on this SACN instance yet, and calling emit() with no
+      //     listener throws "Unhandled error event" → uncaughtException → crash.
+      //  2. After bind succeeds (started=true): scanner.js has registered its
+      //     sacn.on('error') listener, so emit() is safe.
       this.socket.on('error', (err) => {
-        reject(err)             // reject start() Promise if bind/early error fires
-        this.emit('error', err) // also propagate for errors after successful start
+        if (!started) {
+          reject(err)            // bind-time failure — let scanner.js catch handle it
+        } else {
+          this.emit('error', err) // post-start failure — propagate to scanner
+        }
       })
 
       this.socket.bind(SACN_PORT, () => {
+        started = true  // bind succeeded — error handler now safe to emit()
+
         // Gather all non-internal IPv4 addresses so we can join multicast
         // on every NIC — important when lighting traffic is on a different
         // interface than the default route (e.g. wired vs WiFi).
