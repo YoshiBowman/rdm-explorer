@@ -537,8 +537,9 @@ class RDMnet extends EventEmitter {
    * Open UDP socket on port 5569 and start listening for LLRP responses.
    *
    * E1.33 requires LLRP traffic on port 5569 — both sending and receiving.
-   * We bind to port 5569 with reuseAddr so other LLRP applications can
-   * coexist, and join the LLRP multicast group on the specified interface.
+   * We bind to an EPHEMERAL port (not 5569) to avoid conflicting with
+   * the Pathport's own LLRP listener on port 5569.  LLRP probe replies
+   * are sent back to the source IP:port of the probe, so ephemeral works.
    *
    * @param {string} [localIP='0.0.0.0'] - Local interface IP for multicast.
    *   Pass the scan interface IP so multicast probes go out the right NIC.
@@ -576,18 +577,14 @@ class RDMnet extends EventEmitter {
         if (this.listenerCount('error') > 0) this.emit('error', err)
       })
 
-      // Bind to LLRP port 5569 (E1.33 §5.2 — LLRP uses ACN port).
-      // If port 5569 is busy, fall back to ephemeral port (probe still
-      // works for unicast replies; only multicast replies need port 5569).
-      const bindPort = RDMNET_PORT
-      this.socket.bind({ port: bindPort, address: '0.0.0.0', exclusive: false }, () => {
+      // Bind to EPHEMERAL port (port 0) — NOT port 5569.
+      // Binding to 5569 caused Pathport nodes to go offline, likely because
+      // our socket on that port conflicted with their LLRP listener.
+      // LLRP replies are unicast back to our source port, so ephemeral works.
+      this.socket.bind({ port: 0, address: '0.0.0.0' }, () => {
         try { this.socket.setBroadcast(true) } catch (_) {}
-        // E1.33 requires multicastTTL(255) for LLRP traffic
-        try { this.socket.setMulticastTTL(255) } catch (_) {}
-        // Join LLRP multicast group on the specified interface.
-        // Passing localIP ensures the multicast IGMP join goes out
-        // the correct NIC (critical for multi-homed machines).
-        try { this.socket.addMembership(LLRP_MULTICAST, localIP !== '0.0.0.0' ? localIP : undefined) } catch (_) {}
+        // E1.33 requires multicastTTL(20) for LLRP traffic
+        try { this.socket.setMulticastTTL(20) } catch (_) {}
         // Set the outgoing multicast interface so probes go out the right NIC
         if (localIP && localIP !== '0.0.0.0') {
           try { this.socket.setMulticastInterface(localIP) } catch (_) {}
@@ -908,30 +905,23 @@ class RDMnet extends EventEmitter {
     }
     this.on('llrpReply', handler)
 
-    // E1.33 LLRP multicast address (primary — this is what compliant devices listen on)
+    // === GENTLE PROBE STRATEGY ===
+    // Previous versions sent 14+ packets in rapid succession which caused
+    // Pathport nodes to crash/go offline.  Now we send minimal probes
+    // with 150ms spacing to be gentle on the network.
+
+    // 1. Single LLRP multicast probe (the spec-compliant method)
     this.sendLLRPProbe(LLRP_MULTICAST)
+    await _delay(150)
 
-    // Subnet broadcasts (fallback for non-compliant devices)
-    const broadcasts = getLocalBroadcasts()
-    for (const bc of broadcasts) {
-      this.sendLLRPProbe(bc)
-    }
-    this.sendLLRPProbe('255.255.255.255')
-
-    // Direct unicast to known IPs (e.g. manually added Pathport nodes)
+    // 2. Direct unicast to known manual node IPs only (no broadcast flood)
     for (const ip of extraIPs) {
       this.sendLLRPProbe(ip)
+      await _delay(150)
     }
 
-    await _delay(listenMs / 2)
-
-    // Second round
-    this.sendLLRPProbe(LLRP_MULTICAST)
-    for (const bc of broadcasts) this.sendLLRPProbe(bc)
-    this.sendLLRPProbe('255.255.255.255')
-    for (const ip of extraIPs) this.sendLLRPProbe(ip)
-
-    await _delay(listenMs / 2)
+    // Wait for replies
+    await _delay(listenMs)
 
     this.off('llrpReply', handler)
     // Do NOT stopUDP() here — the socket is needed for per-node LLRP RDM
@@ -972,10 +962,8 @@ class RDMnet extends EventEmitter {
       }
       this.on('llrpReply', handler)
 
-      // Send 3 probes with spacing for reliability
+      // Single gentle probe — previous 3x rapid-fire caused node instability
       this.sendLLRPProbe(ip)
-      setTimeout(() => this.sendLLRPProbe(ip), 200)
-      setTimeout(() => this.sendLLRPProbe(ip), 500)
     })
   }
 
