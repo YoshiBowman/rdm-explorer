@@ -594,7 +594,7 @@ class Scanner extends EventEmitter {
         const manualIPs = Array.from(this.manualNodes.keys())
         report('Sending E1.33 LLRP probes (multicast 239.255.250.133 + unicast to known nodes)…')
         try {
-          llrpResults = await this.rdmnet.broadcastProbe(2500, manualIPs)
+          llrpResults = await this.rdmnet.broadcastProbe(2500, manualIPs, bindAddress)
           if (llrpResults.length > 0) {
             report(`LLRP: Found ${llrpResults.length} RDMnet device(s):`)
             for (const r of llrpResults) {
@@ -646,15 +646,17 @@ class Scanner extends EventEmitter {
         }
       }
 
-      // 2. Fallback: if mDNS found no brokers, try TCP to known/local IPs
+      // 2. Fallback: if mDNS found no brokers, try TCP to potential broker IPs.
+      //    IMPORTANT: Do NOT TCP probe manual node IPs (Pathport endpoints).
+      //    Connecting TCP to an RDMnet endpoint that isn't a broker can disrupt
+      //    its existing broker connection and knock it offline.
       if (!brokerIP && scanArtNet && alive()) {
-        const manualIPs = Array.from(this.manualNodes.keys())
         // Collect ALL local IPs (Pathscape might be on any interface)
         const allLocalIPs = _getAllLocalIPs()
         // Collect passively detected ArtDmx source IPs (e.g. Pathscape sending DMX)
         const dmxSourceIPs = Array.from(this.dmxSources.keys())
-        // Deduplicate: manual node IPs + ArtDmx sources + all local IPs + localhost
-        const candidateIPs = [...new Set([...manualIPs, ...dmxSourceIPs, ...allLocalIPs, '127.0.0.1'])]
+        // Deduplicate: ArtDmx sources + all local IPs + localhost (NOT manual node IPs)
+        const candidateIPs = [...new Set([...dmxSourceIPs, ...allLocalIPs, '127.0.0.1'])]
 
         report(`[RDMnet] mDNS found no brokers — probing ${candidateIPs.length} candidate IP(s) on TCP port 5569…`)
 

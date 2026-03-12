@@ -155,45 +155,48 @@ const ACN_PID = Buffer.from('4153432d45312e313700000000000000', 'hex').slice(0, 
  * Build an E1.33 LLRP Probe Request PDU.
  * Sent via UDP multicast/unicast to discover RDMnet devices and brokers.
  *
- * Per ANSI E1.33-2019 §5.4.2.1 and Table A-5, the packet has THREE
- * levels of PDU nesting:
+ * Per ANSI E1.33-2019 §5.4.2, the structure is TWO levels of PDU
+ * nesting with the probe request fields directly in the LLRP data:
  *
  *   ACN Preamble (16 bytes)
  *   Root Layer PDU:
  *     Flags+Length (2)
  *     Vector = VECTOR_ROOT_LLRP (0x0000000A) (4 bytes)
- *     CID (16 bytes) — sender Component Identifier
+ *     Header = CID (16 bytes) — sender Component Identifier
  *     └─ LLRP PDU:
  *          Flags+Length (2)
  *          Vector = VECTOR_LLRP_PROBE_REQUEST (0x00000001) (4 bytes)
- *          Destination CID (16 bytes) — LLRP Broadcast CID for probes
- *          └─ Probe Request Data PDU:
- *               Flags+Length (2)
- *               Vector = VECTOR_PROBE_REQUEST_DATA (0x00000001) (4 bytes)
- *               Lower UID (6 bytes) = 0x0000 0x0000 0x0000
- *               Upper UID (6 bytes) = 0xFFFF 0xFFFF 0xFFFF
- *               Filter (2 bytes)    = 0x0001 (client TCP inactive) | 0x0002 (brokers only)
- *               Known UIDs (variable, 0 for full range)
+ *          Header = Destination CID (16 bytes) — LLRP Broadcast CID
+ *          Data:
+ *            Lower UID (6 bytes)
+ *            Upper UID (6 bytes)
+ *            Filter (1 byte) — 0x01=client TCP inactive, 0x02=brokers only
+ *            Known UIDs (variable, 0 entries for full range)
+ *
+ * NOTE: v0.2.3 tried 3-level nesting (wrapping data in a Probe Request
+ * Data PDU with its own flags+length+vector).  This caused Pathport nodes
+ * to briefly go offline — the extra PDU header bytes were misinterpreted
+ * by the firmware.  Reverted to the simpler 2-level structure.
+ *
+ * Filter is 1 byte per the Wireshark dissector field definition
+ * (hf_rdmnet_llrp_probe_request_filter uses FT_UINT8).
  */
 function buildLLRPProbeRequest(cid) {
-  // Probe Request Data — raw fields (no header at this level)
-  const prPayload = Buffer.alloc(14)
+  // Probe request payload: lower UID(6) + upper UID(6) + filter(1) = 13 bytes
+  const prPayload = Buffer.alloc(13)
   // Lower UID: all zeros (start of search range)
   prPayload.fill(0x00, 0, 6)
   // Upper UID: all 0xFF (end of search range — entire UID space)
   prPayload.fill(0xFF, 6, 12)
-  // Filter: 0x0003 = CLIENT_TCP_INACTIVE | BROKERS_ONLY (include everything)
-  prPayload.writeUInt16BE(0x0003, 12)
-  // No known UIDs appended — we want a full discovery
+  // Filter: 0x03 = CLIENT_TCP_INACTIVE | BROKERS_ONLY (include everything)
+  prPayload[12] = 0x03
+  // No known UIDs appended — full discovery
 
-  // Level 3: Probe Request Data PDU (wraps the raw probe fields)
-  const probeDataPDU = buildPDU(VECTOR_PROBE_REQUEST_DATA, Buffer.alloc(0), prPayload)
+  // LLRP PDU: header = Destination CID, data = probe fields (directly, no inner PDU)
+  // For broadcast probes, Dest CID = LLRP Broadcast CID per E1.33-2019 §5.3.
+  const llrpPDU  = buildPDU(VECTOR_LLRP_PROBE_REQUEST, LLRP_BROADCAST_CID, prPayload)
 
-  // Level 2: LLRP PDU (header = Destination CID, data = Probe Request Data PDU)
-  // For broadcast probes, Destination CID = LLRP Broadcast CID per E1.33-2019 §5.3.
-  const llrpPDU  = buildPDU(VECTOR_LLRP_PROBE_REQUEST, LLRP_BROADCAST_CID, probeDataPDU)
-
-  // Level 1: Root Layer PDU (header = our CID, data = LLRP PDU)
+  // Root Layer PDU: header = our CID, data = LLRP PDU
   const rootPDU  = buildPDU(VECTOR_ROOT_LLRP, cid, llrpPDU)
 
   const pre = Buffer.alloc(16)
@@ -216,10 +219,9 @@ function buildLLRPProbeRequest(cid) {
  * @param {Buffer} rdmPacket - Complete RDM packet (starting with 0xCC)
  */
 function buildLLRPRdmCommand(cid, destCID, rdmPacket) {
-  // Inner PDU: RDM Command Data — vector 0x01 (VECTOR_RDM_CMD_RD_DATA)
-  const rdmCmdPDU = buildPDU(VECTOR_RDM_CMD_RD_DATA, Buffer.alloc(0), rdmPacket)
-  // LLRP layer: vector = RDM_CMD, header = destination CID, data = RDM CMD PDU
-  const llrpPDU = buildPDU(VECTOR_LLRP_RDM_CMD, destCID, rdmCmdPDU)
+  // LLRP layer: vector = RDM_CMD, header = destination CID, data = raw RDM packet
+  // (2-level nesting — RDM packet goes directly in LLRP data, no inner PDU wrapper)
+  const llrpPDU = buildPDU(VECTOR_LLRP_RDM_CMD, destCID, rdmPacket)
   const rootPDU = buildPDU(VECTOR_ROOT_LLRP, cid, llrpPDU)
 
   const pre = Buffer.alloc(16)
@@ -371,19 +373,16 @@ function parseACNPacket(buf) {
 
     if (llrpVec === VECTOR_LLRP_PROBE_REPLY) {
       result.type = 'llrp_probe_reply'
-      // Probe Reply Data PDU: Flags+Length(2) + Vector(4) + UID(6) + HWAddr(6) + ComponentType(1)
-      // Try parsing as a nested PDU first; fall back to raw data
+      // Probe Reply: UID(6) + HW Address(6) + Component Type(1) = 13 bytes
+      // Data is directly in LLRP PDU (no inner PDU wrapper)
       if (llrpData.length >= 6) {
-        const innerLen = ((llrpData[0] & 0x0F) << 8) | llrpData[1]
-        const innerData = llrpData.slice(6, innerLen)  // skip flags+len(2) + vector(4)
-        const replyBytes = innerData.length >= 6 ? innerData : llrpData
-        result.uid  = replyBytes.slice(0, 6).toString('hex').toUpperCase()
+        result.uid  = llrpData.slice(0, 6).toString('hex').toUpperCase()
         result.uidStr = `${result.uid.slice(0,4)}:${result.uid.slice(4)}`
-        if (replyBytes.length >= 12) {
-          result.hwAddr = replyBytes.slice(6, 12).toString('hex').match(/../g).join(':')
+        if (llrpData.length >= 12) {
+          result.hwAddr = llrpData.slice(6, 12).toString('hex').match(/../g).join(':')
         }
-        if (replyBytes.length >= 13) {
-          result.componentType = replyBytes[12]
+        if (llrpData.length >= 13) {
+          result.componentType = llrpData[12]
         }
       }
     } else if (llrpVec === VECTOR_LLRP_PROBE_REQUEST) {
@@ -391,13 +390,8 @@ function parseACNPacket(buf) {
     } else if (llrpVec === VECTOR_LLRP_RDM_CMD) {
       result.type = 'llrp_rdm_cmd'
       result.destCID = llrpDestCID.toString('hex')
-      // LLRP RDM CMD data = nested RDM Command PDU → the RDM packet
-      if (llrpData.length >= 6) {
-        // Skip inner PDU header: flags+len(2) + vector(4) = 6 bytes
-        result.rdmData = llrpData.slice(6)
-      } else {
-        result.rdmData = llrpData
-      }
+      // LLRP RDM CMD data = raw RDM packet (directly in LLRP data)
+      result.rdmData = llrpData
     }
   }
 
@@ -540,10 +534,17 @@ class RDMnet extends EventEmitter {
   // ─── LLRP UDP Probe ────────────────────────────────────────────────────────
 
   /**
-   * Open UDP socket and start listening for LLRP responses.
+   * Open UDP socket on port 5569 and start listening for LLRP responses.
+   *
+   * E1.33 requires LLRP traffic on port 5569 — both sending and receiving.
+   * We bind to port 5569 with reuseAddr so other LLRP applications can
+   * coexist, and join the LLRP multicast group on the specified interface.
+   *
+   * @param {string} [localIP='0.0.0.0'] - Local interface IP for multicast.
+   *   Pass the scan interface IP so multicast probes go out the right NIC.
    * @returns {Promise<void>}
    */
-  startUDP() {
+  startUDP(localIP = '0.0.0.0') {
     return new Promise((resolve, reject) => {
       if (this.socket) return resolve()
 
@@ -575,13 +576,22 @@ class RDMnet extends EventEmitter {
         if (this.listenerCount('error') > 0) this.emit('error', err)
       })
 
-      this.socket.bind(0, '0.0.0.0', () => {
+      // Bind to LLRP port 5569 (E1.33 §5.2 — LLRP uses ACN port).
+      // If port 5569 is busy, fall back to ephemeral port (probe still
+      // works for unicast replies; only multicast replies need port 5569).
+      const bindPort = RDMNET_PORT
+      this.socket.bind({ port: bindPort, address: '0.0.0.0', exclusive: false }, () => {
         try { this.socket.setBroadcast(true) } catch (_) {}
-        // Join LLRP multicast group so we can send probes to 239.255.250.133
-        // and receive any multicast replies.  setMulticastTTL(255) is required
-        // by E1.33 for LLRP traffic.
+        // E1.33 requires multicastTTL(255) for LLRP traffic
         try { this.socket.setMulticastTTL(255) } catch (_) {}
-        try { this.socket.addMembership(LLRP_MULTICAST) } catch (_) {}
+        // Join LLRP multicast group on the specified interface.
+        // Passing localIP ensures the multicast IGMP join goes out
+        // the correct NIC (critical for multi-homed machines).
+        try { this.socket.addMembership(LLRP_MULTICAST, localIP !== '0.0.0.0' ? localIP : undefined) } catch (_) {}
+        // Set the outgoing multicast interface so probes go out the right NIC
+        if (localIP && localIP !== '0.0.0.0') {
+          try { this.socket.setMulticastInterface(localIP) } catch (_) {}
+        }
         resolve()
       })
     })
@@ -881,13 +891,14 @@ class RDMnet extends EventEmitter {
    *
    * @param {number}   [listenMs=3000]  - How long to listen for replies
    * @param {string[]} [extraIPs=[]]    - Additional IPs to probe via unicast
+   * @param {string}   [localIP='0.0.0.0'] - Local interface IP for multicast
    * @returns {Promise<Array>} - Array of LLRP replies
    */
-  async broadcastProbe(listenMs = 3000, extraIPs = []) {
+  async broadcastProbe(listenMs = 3000, extraIPs = [], localIP = '0.0.0.0') {
     const replies = []
     const seen    = new Set()
 
-    await this.startUDP()
+    await this.startUDP(localIP)
 
     const handler = (reply) => {
       if (!seen.has(reply.ip)) {
