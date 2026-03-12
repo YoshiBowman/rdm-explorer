@@ -649,13 +649,12 @@ class Scanner extends EventEmitter {
       // 2. Fallback: if mDNS found no brokers, try TCP to known/local IPs
       if (!brokerIP && scanArtNet && alive()) {
         const manualIPs = Array.from(this.manualNodes.keys())
-        // Collect local IPs on same first-octet as any manual node
-        const localIPs = []
-        for (const mip of manualIPs) {
-          localIPs.push(..._getLocalIPsOnSameOctet(mip))
-        }
-        // Deduplicate: manual node IPs + local IPs + localhost
-        const candidateIPs = [...new Set([...manualIPs, ...localIPs, '127.0.0.1'])]
+        // Collect ALL local IPs (Pathscape might be on any interface)
+        const allLocalIPs = _getAllLocalIPs()
+        // Collect passively detected ArtDmx source IPs (e.g. Pathscape sending DMX)
+        const dmxSourceIPs = Array.from(this.dmxSources.keys())
+        // Deduplicate: manual node IPs + ArtDmx sources + all local IPs + localhost
+        const candidateIPs = [...new Set([...manualIPs, ...dmxSourceIPs, ...allLocalIPs, '127.0.0.1'])]
 
         report(`[RDMnet] mDNS found no brokers — probing ${candidateIPs.length} candidate IP(s) on TCP port 5569…`)
 
@@ -1065,6 +1064,20 @@ function _getLocalIPsOnSameOctet(nodeIP) {
       if (addr.family === 'IPv4' && !addr.internal) {
         const localOctet = parseInt(addr.address.split('.')[0], 10)
         if (localOctet === nodeOctet) result.push(addr.address)
+      }
+    }
+  }
+  return [...new Set(result)]
+}
+
+/** Return all non-loopback IPv4 addresses on this machine. */
+function _getAllLocalIPs() {
+  const result = []
+  const ifaces = os.networkInterfaces()
+  for (const addrs of Object.values(ifaces)) {
+    for (const addr of (addrs || [])) {
+      if (addr.family === 'IPv4' && !addr.internal) {
+        result.push(addr.address)
       }
     }
   }

@@ -19,9 +19,9 @@
  *   Header       (N bytes, depends on layer)
  *   Data         (N bytes, PDU payload)
  *
- * Root Layer Vector for RDMnet: 0x00000003 (VECTOR_ROOT_BROKER)
- *                                0x00000004 (VECTOR_ROOT_RPT)
- *                                0x00000005 (VECTOR_ROOT_EPT)
+ * Root Layer Vector for RDMnet: 0x00000005 (VECTOR_ROOT_RPT)
+ *                                0x00000009 (VECTOR_ROOT_BROKER)
+ *                                0x0000000A (VECTOR_ROOT_LLRP)
  */
 
 'use strict'
@@ -49,6 +49,9 @@ const VECTOR_ROOT_BROKER     = 0x00000009
 const VECTOR_LLRP_PROBE_REQUEST  = 0x00000001
 const VECTOR_LLRP_PROBE_REPLY    = 0x00000002
 const VECTOR_LLRP_RDM_CMD        = 0x00000003
+
+// LLRP Probe Request inner PDU vector (Table A-5)
+const VECTOR_PROBE_REQUEST_DATA  = 0x00000001
 
 // RPT vectors
 const VECTOR_RPT_REQUEST  = 0x00000001
@@ -150,37 +153,47 @@ const ACN_PID = Buffer.from('4153432d45312e313700000000000000', 'hex').slice(0, 
 
 /**
  * Build an E1.33 LLRP Probe Request PDU.
- * Sent via UDP broadcast to discover RDMnet brokers and devices.
+ * Sent via UDP multicast/unicast to discover RDMnet devices and brokers.
  *
- * Structure:
+ * Per ANSI E1.33-2019 §5.4.2.1 and Table A-5, the packet has THREE
+ * levels of PDU nesting:
+ *
  *   ACN Preamble (16 bytes)
- *   Root PDU:
- *     Flags+Length
- *     Vector = VECTOR_ROOT_LLRP (0x00000008)
- *     CID (16 bytes)
- *     LLRP PDU:
- *       Flags+Length
- *       Vector = VECTOR_LLRP_PROBE_REQUEST (0x00000001)
- *       [no header for probe request]
- *       Probe Request PDU:
- *         Lower UID (6 bytes) = 0x0000 0x0000 0x0000
- *         Upper UID (6 bytes) = 0xFFFF 0xFFFF 0xFFFF
- *         Filter (2 bytes)    = 0x0001 (include brokers) | 0x0002 (include devices)
- *         [Known UIDs TLV omitted]
+ *   Root Layer PDU:
+ *     Flags+Length (2)
+ *     Vector = VECTOR_ROOT_LLRP (0x0000000A) (4 bytes)
+ *     CID (16 bytes) — sender Component Identifier
+ *     └─ LLRP PDU:
+ *          Flags+Length (2)
+ *          Vector = VECTOR_LLRP_PROBE_REQUEST (0x00000001) (4 bytes)
+ *          Destination CID (16 bytes) — LLRP Broadcast CID for probes
+ *          └─ Probe Request Data PDU:
+ *               Flags+Length (2)
+ *               Vector = VECTOR_PROBE_REQUEST_DATA (0x00000001) (4 bytes)
+ *               Lower UID (6 bytes) = 0x0000 0x0000 0x0000
+ *               Upper UID (6 bytes) = 0xFFFF 0xFFFF 0xFFFF
+ *               Filter (2 bytes)    = 0x0001 (client TCP inactive) | 0x0002 (brokers only)
+ *               Known UIDs (variable, 0 for full range)
  */
 function buildLLRPProbeRequest(cid) {
-  // Probe request payload: lower UID, upper UID, filter
+  // Probe Request Data — raw fields (no header at this level)
   const prPayload = Buffer.alloc(14)
-  // Lower UID: all zeros
+  // Lower UID: all zeros (start of search range)
   prPayload.fill(0x00, 0, 6)
-  // Upper UID: all 0xFF
+  // Upper UID: all 0xFF (end of search range — entire UID space)
   prPayload.fill(0xFF, 6, 12)
-  // Filter: 0x0003 = BROKERS | DEVICES
+  // Filter: 0x0003 = CLIENT_TCP_INACTIVE | BROKERS_ONLY (include everything)
   prPayload.writeUInt16BE(0x0003, 12)
+  // No known UIDs appended — we want a full discovery
 
-  // LLRP PDU header = Destination CID (16 bytes).
-  // For Probe Requests, use the LLRP Broadcast CID per E1.33-2019 §5.3.
-  const llrpPDU  = buildPDU(VECTOR_LLRP_PROBE_REQUEST, LLRP_BROADCAST_CID, prPayload)
+  // Level 3: Probe Request Data PDU (wraps the raw probe fields)
+  const probeDataPDU = buildPDU(VECTOR_PROBE_REQUEST_DATA, Buffer.alloc(0), prPayload)
+
+  // Level 2: LLRP PDU (header = Destination CID, data = Probe Request Data PDU)
+  // For broadcast probes, Destination CID = LLRP Broadcast CID per E1.33-2019 §5.3.
+  const llrpPDU  = buildPDU(VECTOR_LLRP_PROBE_REQUEST, LLRP_BROADCAST_CID, probeDataPDU)
+
+  // Level 1: Root Layer PDU (header = our CID, data = LLRP PDU)
   const rootPDU  = buildPDU(VECTOR_ROOT_LLRP, cid, llrpPDU)
 
   const pre = Buffer.alloc(16)
@@ -203,8 +216,10 @@ function buildLLRPProbeRequest(cid) {
  * @param {Buffer} rdmPacket - Complete RDM packet (starting with 0xCC)
  */
 function buildLLRPRdmCommand(cid, destCID, rdmPacket) {
-  // LLRP layer: vector = RDM_CMD, header = destination CID, data = RDM packet
-  const llrpPDU = buildPDU(VECTOR_LLRP_RDM_CMD, destCID, rdmPacket)
+  // Inner PDU: RDM Command Data — vector 0x01 (VECTOR_RDM_CMD_RD_DATA)
+  const rdmCmdPDU = buildPDU(VECTOR_RDM_CMD_RD_DATA, Buffer.alloc(0), rdmPacket)
+  // LLRP layer: vector = RDM_CMD, header = destination CID, data = RDM CMD PDU
+  const llrpPDU = buildPDU(VECTOR_LLRP_RDM_CMD, destCID, rdmCmdPDU)
   const rootPDU = buildPDU(VECTOR_ROOT_LLRP, cid, llrpPDU)
 
   const pre = Buffer.alloc(16)
@@ -341,29 +356,45 @@ function parseACNPacket(buf) {
   }
 
   // Parse LLRP layer
-  if (rootVec === VECTOR_ROOT_LLRP && childBuf.length >= 6) {
+  // LLRP PDU structure: Flags+Length(2) + Vector(4) + Dest CID Header(16) + Data(N)
+  // Total header overhead: 2 + 4 + 16 = 22 bytes minimum
+  if (rootVec === VECTOR_ROOT_LLRP && childBuf.length >= 22) {
     const llrpLen = ((childBuf[0] & 0x0F) << 8) | childBuf[1]
     const llrpVec = childBuf.readUInt32BE(2)
-    const llrpData = childBuf.slice(6, llrpLen)
+    // LLRP header = Destination CID (16 bytes) at offset 6..22
+    const llrpDestCID = childBuf.slice(6, 22)
+    // LLRP data starts AFTER the 16-byte Dest CID header (offset 22)
+    const llrpData = childBuf.slice(22, llrpLen)
 
     result.llrpVector = llrpVec
+    result.llrpDestCID = llrpDestCID.toString('hex')
 
-    if (llrpVec === VECTOR_LLRP_PROBE_REPLY && llrpData.length >= 6) {
-      // Probe reply: UID (6 bytes) + hardware address (6 bytes)
+    if (llrpVec === VECTOR_LLRP_PROBE_REPLY) {
       result.type = 'llrp_probe_reply'
-      result.uid  = llrpData.slice(0, 6).toString('hex').toUpperCase()
-      result.uidStr = `${result.uid.slice(0,4)}:${result.uid.slice(4)}`
-      if (llrpData.length >= 12) {
-        result.hwAddr = llrpData.slice(6, 12).toString('hex').match(/../g).join(':')
+      // Probe Reply Data PDU: Flags+Length(2) + Vector(4) + UID(6) + HWAddr(6) + ComponentType(1)
+      // Try parsing as a nested PDU first; fall back to raw data
+      if (llrpData.length >= 6) {
+        const innerLen = ((llrpData[0] & 0x0F) << 8) | llrpData[1]
+        const innerData = llrpData.slice(6, innerLen)  // skip flags+len(2) + vector(4)
+        const replyBytes = innerData.length >= 6 ? innerData : llrpData
+        result.uid  = replyBytes.slice(0, 6).toString('hex').toUpperCase()
+        result.uidStr = `${result.uid.slice(0,4)}:${result.uid.slice(4)}`
+        if (replyBytes.length >= 12) {
+          result.hwAddr = replyBytes.slice(6, 12).toString('hex').match(/../g).join(':')
+        }
+        if (replyBytes.length >= 13) {
+          result.componentType = replyBytes[12]
+        }
       }
     } else if (llrpVec === VECTOR_LLRP_PROBE_REQUEST) {
       result.type = 'llrp_probe_request'
     } else if (llrpVec === VECTOR_LLRP_RDM_CMD) {
       result.type = 'llrp_rdm_cmd'
-      // LLRP RDM CMD: header = destination CID (16 bytes), data = RDM packet
-      if (llrpData.length > 16) {
-        result.destCID = llrpData.slice(0, 16).toString('hex')
-        result.rdmData = llrpData.slice(16)
+      result.destCID = llrpDestCID.toString('hex')
+      // LLRP RDM CMD data = nested RDM Command PDU → the RDM packet
+      if (llrpData.length >= 6) {
+        // Skip inner PDU header: flags+len(2) + vector(4) = 6 bytes
+        result.rdmData = llrpData.slice(6)
       } else {
         result.rdmData = llrpData
       }
