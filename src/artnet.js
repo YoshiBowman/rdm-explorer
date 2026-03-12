@@ -61,10 +61,19 @@ class ArtNet extends EventEmitter {
     return new Promise((resolve, reject) => {
       this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
 
+      let started = false  // flips to true once bind() succeeds
+
       this.socket.on('message', (msg, rinfo) => this._handleMessage(msg, rinfo))
-      this.socket.on('error', (err) => { this.emit('error', err); reject(err) })
+      this.socket.on('error', (err) => {
+        if (!started) {
+          reject(err)  // bind-time: no 'error' listener registered yet, don't emit
+        } else if (this.listenerCount('error') > 0) {
+          this.emit('error', err)  // post-start: only emit if someone is listening
+        }
+      })
 
       this.socket.bind(ARTNET_PORT, '0.0.0.0', () => {
+        started = true
         try { this.socket.setBroadcast(true) } catch (_) {}
         resolve()
       })

@@ -693,16 +693,23 @@ function readDNSName(buf, off) {
   let name = ''
   let jumped = false
   let returnOff = off
+  let hops = 0  // guard against circular compression pointers
 
   while (off < buf.length) {
+    // DNS names are max 253 chars / ~128 labels. If we've followed more than
+    // 64 pointer hops it's a circular reference — bail out to avoid blocking
+    // the event loop forever (infinite loop = frozen app = "crash").
+    if (++hops > 64) break
     const len = buf[off]
     if (len === 0) { off++; break }
     if ((len & 0xC0) === 0xC0) {
+      if (off + 1 >= buf.length) break  // truncated pointer
       if (!jumped) returnOff = off + 2
       off = ((len & 0x3F) << 8) | buf[off + 1]
       jumped = true
       continue
     }
+    if (off + 1 + len > buf.length) break  // label extends past buffer
     if (name) name += '.'
     name += buf.slice(off + 1, off + 1 + len).toString('ascii')
     off += 1 + len
