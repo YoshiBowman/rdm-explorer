@@ -392,6 +392,30 @@ class Scanner extends EventEmitter {
     try {
       const allDevices = []
 
+      // ── mDNS RDMnet pre-scan (once, before per-node work) ─────────────────
+      // Run this early so results are ready to display per-node without
+      // re-querying the network 4 times.
+      let mdnsRDMnetServices = []
+      if (scanArtNet) {
+        report('Pre-scanning for _rdmnet._tcp.local services via mDNS…')
+        try {
+          mdnsRDMnetServices = await Promise.race([
+            this.rdmnet.discoverMDNS(2000),
+            new Promise(r => setTimeout(() => r([]), 3500)),
+          ])
+          if (mdnsRDMnetServices.length > 0) {
+            report(`mDNS found ${mdnsRDMnetServices.length} RDMnet broker(s) on the network:`)
+            for (const svc of mdnsRDMnetServices) {
+              report(`  ${svc.name}  →  ${svc.ip}:${svc.port}`)
+            }
+          } else {
+            report('No _rdmnet._tcp.local brokers found via mDNS.')
+          }
+        } catch (e) {
+          report(`mDNS pre-scan error: ${e.message}`)
+        }
+      }
+
       // ── Art-Net Discovery ──────────────────────────────────────────────────
       if (scanArtNet) {
         report(`Sending ArtPoll to: ${this.broadcasts.join(', ')}${this.subnetOverride ? ` + unicast sweep of ${this.subnetOverride}.1–254` : ''}`)
@@ -498,24 +522,16 @@ class Scanner extends EventEmitter {
                     report(`           (Pathway's RDMnet controller) or another E1.33 controller.`)
                     report(`           RDM Explorer currently supports Art-Net RDM only.`)
                   } else {
-                    report(`  [RDMnet] No E1.33 RDMnet response from ${node.ip}.`)
-                    report(`         → In Pathscape, verify the node's IP and that RDMnet is`)
-                    report(`           enabled.  Also check if Art-Net RDM is enabled per port.`)
+                    const tcpRefused = rdmnetResult.brokerData === null && !rdmnetResult.tcpConnected
+                    report(`  [RDMnet] ${node.ip} is not running E1.33 RDMnet (Art-Net RDM or E1.33).`)
+                    report(`         → This node is likely running Pathway's proprietary Pathport protocol.`)
+                    report(`         → In Pathscape: select the node → Ports → enable "Art-Net RDM" per port,`)
+                    report(`           OR switch the node's protocol mode to Art-Net if it's in Pathport mode.`)
                   }
 
-                  // mDNS scan for any RDMnet broker on the local network segment
-                  report(`  [RDMnet] Scanning for _rdmnet._tcp.local via mDNS (2 s)…`)
-                  const mdnsResults = await Promise.race([
-                    this.rdmnet.discoverMDNS(2000),
-                    new Promise(r => setTimeout(() => r([]), 3500)),  // absolute failsafe
-                  ])
-                  if (mdnsResults.length > 0) {
-                    report(`  [RDMnet] mDNS found ${mdnsResults.length} RDMnet service(s):`)
-                    for (const svc of mdnsResults) {
-                      report(`    ${svc.name}  →  ${svc.ip}:${svc.port}`)
-                    }
-                  } else {
-                    report(`  [RDMnet] No _rdmnet._tcp.local services found via mDNS.`)
+                  // Use the mDNS results already collected at scan start (no re-query)
+                  if (mdnsRDMnetServices.length > 0) {
+                    report(`  [RDMnet] RDMnet brokers found earlier via mDNS: ${mdnsRDMnetServices.map(s => s.ip).join(', ')}`)
                   }
 
                 } catch (rdmnetErr) {

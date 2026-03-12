@@ -415,27 +415,31 @@ class RDMnet extends EventEmitter {
         const parsed = parseMDNSResponse(msg)
         if (!parsed) return
 
-        // Look for A records and SRV records related to _rdmnet._tcp
-        for (const record of parsed.answers.concat(parsed.additionals || [])) {
-          if (record.type === 'A' && rinfo.address) {
-            if (found.has(record.name)) {
-              found.get(record.name).ip = record.data
-            } else {
-              found.set(record.name, { name: record.name, ip: record.data, port: RDMNET_PORT })
-            }
-          }
-          if (record.type === 'SRV') {
-            const key = record.name
-            const existing = found.get(key) || { name: key, ip: rinfo.address, port: record.data.port }
-            existing.port = record.data.port
-            if (!existing.ip) existing.ip = rinfo.address
-            found.set(key, existing)
-          }
-          if (record.type === 'PTR' && record.name.includes('_rdmnet')) {
+        const allRecords = parsed.answers.concat(parsed.additionals || [])
+
+        // First pass: collect service instance names from _rdmnet._tcp PTR records ONLY.
+        // We must NOT create entries for arbitrary A records — macOS mDNS floods us
+        // with its entire cache (Apple TVs, printers, MacBooks) when we send a query,
+        // and every .local hostname would falsely appear as an RDMnet device.
+        for (const record of allRecords) {
+          if (record.type === 'PTR' && record.name && record.name.includes('_rdmnet._tcp')) {
             const svcName = record.data
-            if (!found.has(svcName)) {
+            if (svcName && !found.has(svcName)) {
               found.set(svcName, { name: svcName, ip: rinfo.address, port: RDMNET_PORT })
             }
+          }
+        }
+
+        // Second pass: enrich known _rdmnet service instances with SRV/A data
+        for (const record of allRecords) {
+          if (record.type === 'SRV' && found.has(record.name)) {
+            const entry = found.get(record.name)
+            entry.port = record.data.port
+            if (!entry.ip) entry.ip = rinfo.address
+          }
+          if (record.type === 'A' && found.has(record.name)) {
+            // Only update IP for a name we already know is an _rdmnet service
+            found.get(record.name).ip = record.data
           }
         }
       })
