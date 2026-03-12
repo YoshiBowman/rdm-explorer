@@ -85,6 +85,18 @@ window.addEventListener('DOMContentLoaded', async () => {
 async function loadManualNodes() {
   const nodes = await window.rdm.getManualNodes()
   renderManualNodes(nodes)
+  // Also populate the main Nodes list with any already-saved manual nodes
+  for (const n of (nodes || [])) {
+    addNode({
+      ip:          n.ip,
+      shortName:   n.name || `Manual @ ${n.ip}`,
+      longName:    n.name ? `${n.name} (${n.ip})` : `Manually added — ${n.ip}`,
+      protocol:    'artnet-manual',
+      supportsRDM: true,
+      manual:      true,
+      universes:   [],
+    })
+  }
 }
 
 function renderManualNodes(nodes) {
@@ -132,6 +144,20 @@ const App = {
     clearAll()
     setScanningUI(true)
     log(`Starting scan (${protocolLabel()})…`)
+    // Re-add manually configured nodes to the Nodes list so they're visible
+    // during the scan, even before the scanner emits nodeFound for them.
+    const savedManual = await window.rdm.getManualNodes()
+    for (const n of (savedManual || [])) {
+      addNode({
+        ip:          n.ip,
+        shortName:   n.name || `Manual @ ${n.ip}`,
+        longName:    n.name ? `${n.name} (${n.ip})` : `Manually added — ${n.ip}`,
+        protocol:    'artnet-manual',
+        supportsRDM: true,
+        manual:      true,
+        universes:   [],
+      })
+    }
 
     const sel = document.getElementById('ifaceSelect')
     const bindAddress = sel.value
@@ -150,6 +176,16 @@ const App = {
       document.getElementById('manualNodeName').value = ''
       const nodes = await window.rdm.getManualNodes()
       renderManualNodes(nodes)
+      // Surface this node in the main Nodes list immediately (don't wait for scan)
+      addNode({
+        ip,
+        shortName:   name || `Manual @ ${ip}`,
+        longName:    name ? `${name} (${ip})` : `Manually added — ${ip}`,
+        protocol:    'artnet-manual',
+        supportsRDM: true,
+        manual:      true,
+        universes:   [],
+      })
     } else {
       log(`Could not add node: ${res.error}`, 'err')
     }
@@ -157,6 +193,9 @@ const App = {
 
   async removeManualNode(ip) {
     await window.rdm.removeManualNode(ip)
+    // Remove from the main Nodes list as well
+    State.nodes = State.nodes.filter(n => !(n.ip === ip && n.protocol === 'artnet-manual'))
+    rerenderNodeList()
     const nodes = await window.rdm.getManualNodes()
     renderManualNodes(nodes)
   },

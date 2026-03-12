@@ -406,23 +406,27 @@ class Scanner extends EventEmitter {
             // ── Connectivity pre-check for manually added nodes ──────────────
             // Manually added nodes never respond to ArtPoll so we can't confirm
             // connectivity that way.  A quick ICMP ping tells us whether IP-level
-            // traffic can actually reach the node before we spend time on RDM.
+            // traffic can actually reach the node before spending time on RDM.
             if (node.manual) {
               report(`  [ping] Checking connectivity to ${node.ip}…`)
               const reachable = await this._pingHost(node.ip)
               if (reachable) {
                 report(`  [ping] ${node.ip} is reachable ✓`)
               } else {
-                report(`  [ping] WARNING: ${node.ip} did not respond to ping.`)
-                report(`         Packets may not be reaching this node.`)
-                report(`         Check that the Mac is on the same network segment as the node`)
-                report(`         (or that ICMP is not blocked by the switch).`)
-                report(`         RDM discovery will still be attempted.`)
+                report(`  [ping] WARNING: ${node.ip} did not respond to ping — node is not`)
+                report(`         reachable from this machine.  Skipping RDM scan for this node.`)
+                report(`         FIX: Make sure this Mac has a NIC configured on the same subnet`)
+                report(`         as the node.  Open System Settings → Network, add an IP like`)
+                report(`         10.30.142.250/8 to the ethernet interface, then scan again.`)
+                report(`         (Pathscape reaches nodes via its own proprietary discovery,`)
+                report(`          which may not require standard IP routing.)`)
+                continue  // no point sending Art-Net into the void
               }
             }
 
             if (!node.supportsRDM) {
-              report(`  ${node.shortName} does not appear to support RDM — skipping.`)
+              report(`  ${node.shortName} does not support RDM — skipping RDM scan.`)
+              continue
             }
 
             const universesToScan = node.universes.length > 0
@@ -469,16 +473,15 @@ class Scanner extends EventEmitter {
               }
             }
 
-            // If node was reachable (ping) but RDM returned nothing, give a hint
+            // Node was reachable but RDM returned nothing — give specific hints
             if (node.manual && !nodeFoundAnyDevices) {
               report(`  NOTE: No RDM devices found on ${node.shortName}.`)
               report(`        Possible causes:`)
-              report(`        1. Node not reachable via Art-Net UDP (check NIC / VLAN)`)
-              report(`        2. Node does not support Art-Net RDM passthrough (Pathport`)
-              report(`           nodes use Pathway's own protocol for RDM management)`)
-              report(`        3. Universes 0–${universesToScan.length - 1} may not match this`)
-              report(`           node's Art-Net universe configuration (check Pathscape)`)
-              report(`        4. No RDM-capable fixtures are currently patched to this node`)
+              report(`        1. Node does not support Art-Net RDM passthrough`)
+              report(`           (Pathport/LX Opto use Pathway's own RDM protocol)`)
+              report(`        2. Universes 0–${universesToScan.length - 1} may not match`)
+              report(`           this node's Art-Net universe config (check Pathscape)`)
+              report(`        3. No RDM-capable fixtures patched to this node`)
             }
           }
         }
