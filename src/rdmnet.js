@@ -32,12 +32,18 @@ const EventEmitter = require('events')
 const os           = require('os')
 
 const RDMNET_PORT   = 5569
-const LLRP_MULTICAST = '239.255.250.133'  // E1.33 LLRP multicast address (informational)
+const LLRP_MULTICAST = '239.255.250.133'  // E1.33 LLRP multicast address
 
-// Root-layer vectors
-const VECTOR_ROOT_LLRP       = 0x00000008
-const VECTOR_ROOT_BROKER     = 0x00000003
-const VECTOR_ROOT_RPT        = 0x00000004
+// LLRP Broadcast CID — used as Destination CID in LLRP Probe Requests
+// to address all LLRP targets.  Per E1.33-2019 Section 5.3.
+const LLRP_BROADCAST_CID = Buffer.from('fbad822cbd0c4d4cbdc87eabebc85aff', 'hex')
+
+// Root-layer vectors (E1.33 Table A-3 — per Wireshark packet-acn.c / ANSI E1.33-2019)
+// CRITICAL: these must NOT be confused with E1.31 sACN vectors
+//   0x00000004 = sACN Data (E1.31), 0x00000008 = sACN Extended (E1.31)
+const VECTOR_ROOT_LLRP       = 0x0000000A
+const VECTOR_ROOT_RPT        = 0x00000005
+const VECTOR_ROOT_BROKER     = 0x00000009
 
 // LLRP vectors
 const VECTOR_LLRP_PROBE_REQUEST  = 0x00000001
@@ -172,7 +178,9 @@ function buildLLRPProbeRequest(cid) {
   // Filter: 0x0003 = BROKERS | DEVICES
   prPayload.writeUInt16BE(0x0003, 12)
 
-  const llrpPDU  = buildPDU(VECTOR_LLRP_PROBE_REQUEST, Buffer.alloc(0), prPayload)
+  // LLRP PDU header = Destination CID (16 bytes).
+  // For Probe Requests, use the LLRP Broadcast CID per E1.33-2019 §5.3.
+  const llrpPDU  = buildPDU(VECTOR_LLRP_PROBE_REQUEST, LLRP_BROADCAST_CID, prPayload)
   const rootPDU  = buildPDU(VECTOR_ROOT_LLRP, cid, llrpPDU)
 
   const pre = Buffer.alloc(16)
