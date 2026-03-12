@@ -585,12 +585,44 @@ class Scanner extends EventEmitter {
 
       if (!alive()) return allDevices  // scanner was stopped during mDNS
 
+      // ── LLRP Discovery (BEFORE per-node scan to populate device cache) ──
+      // E1.33 LLRP probes go to multicast 239.255.250.133:5569 plus unicast
+      // to each known manual node IP.  Replies populate rdmnet._llrpDevices
+      // so the per-node LLRP fallback has cached CIDs to work with.
+      let llrpResults = []
+      if (scanArtNet && alive()) {
+        const manualIPs = Array.from(this.manualNodes.keys())
+        report('Sending E1.33 LLRP probes (multicast 239.255.250.133 + unicast to known nodes)…')
+        try {
+          llrpResults = await this.rdmnet.broadcastProbe(2500, manualIPs)
+          if (llrpResults.length > 0) {
+            report(`LLRP: Found ${llrpResults.length} RDMnet device(s):`)
+            for (const r of llrpResults) {
+              report(`  ${r.ip}  UID: ${r.uidStr || 'n/a'}  CID: ${(r.cid || '').slice(0,16)}…`)
+            }
+          } else {
+            report('LLRP: No RDMnet devices responded to probe.')
+          }
+        } catch (e) {
+          report(`LLRP probe error: ${e.message}`)
+        }
+      }
+
+      if (!alive()) return allDevices
+
       // ── Broker connection ────────────────────────────────────────────────
-      // If we discovered RDMnet brokers via mDNS, connect to the first one
-      // as an RPT Controller so we can send RDM through the broker later.
+      // Strategy:
+      //   1. If mDNS found brokers, connect to the first one.
+      //   2. If mDNS found nothing, try TCP probe to:
+      //      a) Each manual node IP (Pathport nodes might expose a broker)
+      //      b) Local IPs on the same first-octet subnet (Pathscape on local machine)
+      //      c) 127.0.0.1 (Pathscape on this machine)
       let brokerIP = null
+
+      // 1. mDNS-discovered brokers
       if (scanArtNet && mdnsRDMnetServices.length > 0 && alive()) {
         for (const svc of mdnsRDMnetServices) {
+          if (!alive()) break
           report(`[RDMnet] Connecting to broker at ${svc.ip}:${svc.port}…`)
           try {
             const conn = await this.rdmnet.connectBroker(svc.ip, svc.port, 5000)
@@ -611,6 +643,41 @@ class Scanner extends EventEmitter {
           } catch (e) {
             report(`[RDMnet] Failed to connect to broker at ${svc.ip}: ${e.message}`)
           }
+        }
+      }
+
+      // 2. Fallback: if mDNS found no brokers, try TCP to known/local IPs
+      if (!brokerIP && scanArtNet && alive()) {
+        const manualIPs = Array.from(this.manualNodes.keys())
+        // Collect local IPs on same first-octet as any manual node
+        const localIPs = []
+        for (const mip of manualIPs) {
+          localIPs.push(..._getLocalIPsOnSameOctet(mip))
+        }
+        // Deduplicate: manual node IPs + local IPs + localhost
+        const candidateIPs = [...new Set([...manualIPs, ...localIPs, '127.0.0.1'])]
+
+        report(`[RDMnet] mDNS found no brokers — probing ${candidateIPs.length} candidate IP(s) on TCP port 5569…`)
+
+        for (const ip of candidateIPs) {
+          if (!alive() || brokerIP) break
+          try {
+            const conn = await this.rdmnet.connectBroker(ip, RDMNET_PORT, 2000)
+            if (conn.connected) {
+              brokerIP = ip
+              report(`[RDMnet] ✓ Found broker at ${ip}:${RDMNET_PORT} via TCP probe`)
+              if (conn.clients.length > 0) {
+                const devices = conn.clients.filter(c => c.clientType === 2)
+                report(`[RDMnet]   Broker reports ${devices.length} RPT Device(s):`)
+                for (const c of devices) {
+                  report(`[RDMnet]     ${c.uidStr} (CID: ${c.cid.slice(0,8)}…)`)
+                }
+              }
+            }
+          } catch (_) {}
+        }
+        if (!brokerIP) {
+          report(`[RDMnet] No brokers found via TCP probe.`)
         }
       }
 
@@ -709,7 +776,24 @@ class Scanner extends EventEmitter {
 
             // ── Try 2: LLRP RDM (if Art-Net found nothing) ─────────────────
             if (!nodeFoundAnyDevices && alive()) {
-              const llrpDev = this.rdmnet.getLLRPDevice(node.ip)
+              let llrpDev = this.rdmnet.getLLRPDevice(node.ip)
+
+              // If the broadcast probe didn't cache this IP, try a direct
+              // unicast LLRP probe — the device might only respond to unicast
+              // or multicast didn't reach it due to network topology.
+              if (!llrpDev) {
+                report(`  [LLRP] No cached CID for ${node.ip} — sending direct LLRP probe…`)
+                try {
+                  const directReply = await this.rdmnet.probeIPDirect(node.ip, 1500)
+                  if (directReply) {
+                    report(`  [LLRP] ✓ Got LLRP reply from ${node.ip}: UID ${directReply.uidStr || 'n/a'}`)
+                    llrpDev = this.rdmnet.getLLRPDevice(node.ip)
+                  } else {
+                    report(`  [LLRP] No LLRP reply from ${node.ip}.`)
+                  }
+                } catch (_) {}
+              }
+
               if (llrpDev) {
                 report(`  [LLRP] Art-Net RDM yielded nothing — trying LLRP RDM (CID: ${llrpDev.cid.toString('hex').slice(0,8)}…)`)
 
@@ -902,25 +986,7 @@ class Scanner extends EventEmitter {
         }
       }
 
-      // ── E1.33 RDMnet Broadcast Discovery ─────────────────────────────────
-      // Send LLRP broadcast probes on all local subnets to catch any RDMnet
-      // brokers that weren't found via Art-Net (e.g. Pathway LX Opto series).
-      if (scanArtNet) {
-        report('Sending E1.33 RDMnet LLRP broadcast probes…')
-        try {
-          const llrpFound = await this.rdmnet.broadcastProbe(2000)
-          if (llrpFound.length > 0) {
-            report(`Found ${llrpFound.length} RDMnet device(s) via LLRP broadcast:`)
-            for (const r of llrpFound) {
-              report(`  ${r.ip}  UID: ${r.uidStr || 'n/a'}  CID: ${r.cid || 'n/a'}`)
-            }
-          } else {
-            report('No RDMnet devices found via LLRP broadcast.')
-          }
-        } catch (e) {
-          report(`RDMnet broadcast probe error: ${e.message}`)
-        }
-      }
+      // (LLRP broadcast probes already sent at start of scan — see above)
 
       const totalNodes = (scanArtNet ? this.nodes.size : 0) +
                          (scanSACN ? this.sacnSources.size : 0) +

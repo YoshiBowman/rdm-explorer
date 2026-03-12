@@ -538,6 +538,11 @@ class RDMnet extends EventEmitter {
 
       this.socket.bind(0, '0.0.0.0', () => {
         try { this.socket.setBroadcast(true) } catch (_) {}
+        // Join LLRP multicast group so we can send probes to 239.255.250.133
+        // and receive any multicast replies.  setMulticastTTL(255) is required
+        // by E1.33 for LLRP traffic.
+        try { this.socket.setMulticastTTL(255) } catch (_) {}
+        try { this.socket.addMembership(LLRP_MULTICAST) } catch (_) {}
         resolve()
       })
     })
@@ -825,11 +830,21 @@ class RDMnet extends EventEmitter {
   // ─── Broadcast LLRP sweep ────────────────────────────────────────────────
 
   /**
-   * Broadcast LLRP probe on all local subnets for the given listen period.
-   * @param {number} [listenMs=3000]
+   * Send LLRP probes on multicast, broadcast, and unicast to discover
+   * RDMnet devices and populate the _llrpDevices cache.
+   *
+   * E1.33 spec requires probes go to multicast 239.255.250.133:5569.
+   * We also send to subnet broadcasts (catches non-compliant devices)
+   * and direct unicast to any specific IPs provided.
+   *
+   * NOTE: Does NOT close the UDP socket afterwards — caller is responsible
+   * for cleanup (scanner.stop() → rdmnet.destroy()).
+   *
+   * @param {number}   [listenMs=3000]  - How long to listen for replies
+   * @param {string[]} [extraIPs=[]]    - Additional IPs to probe via unicast
    * @returns {Promise<Array>} - Array of LLRP replies
    */
-  async broadcastProbe(listenMs = 3000) {
+  async broadcastProbe(listenMs = 3000, extraIPs = []) {
     const replies = []
     const seen    = new Set()
 
@@ -843,24 +858,81 @@ class RDMnet extends EventEmitter {
     }
     this.on('llrpReply', handler)
 
-    // Broadcast on all local subnets
+    // E1.33 LLRP multicast address (primary — this is what compliant devices listen on)
+    this.sendLLRPProbe(LLRP_MULTICAST)
+
+    // Subnet broadcasts (fallback for non-compliant devices)
     const broadcasts = getLocalBroadcasts()
     for (const bc of broadcasts) {
       this.sendLLRPProbe(bc)
     }
     this.sendLLRPProbe('255.255.255.255')
 
+    // Direct unicast to known IPs (e.g. manually added Pathport nodes)
+    for (const ip of extraIPs) {
+      this.sendLLRPProbe(ip)
+    }
+
     await _delay(listenMs / 2)
 
+    // Second round
+    this.sendLLRPProbe(LLRP_MULTICAST)
     for (const bc of broadcasts) this.sendLLRPProbe(bc)
     this.sendLLRPProbe('255.255.255.255')
+    for (const ip of extraIPs) this.sendLLRPProbe(ip)
 
     await _delay(listenMs / 2)
 
     this.off('llrpReply', handler)
-    this.stopUDP()
+    // Do NOT stopUDP() here — the socket is needed for per-node LLRP RDM
+    // scanning that follows.  Scanner.stop() → rdmnet.destroy() handles cleanup.
 
     return replies
+  }
+
+  /**
+   * Send unicast LLRP probes to a specific IP and wait for a reply.
+   * Used as a per-node fallback when the initial broadcast probe didn't
+   * reach a particular device.
+   *
+   * @param {string} ip           - Target IP
+   * @param {number} [listenMs=1500]
+   * @returns {Promise<object|null>} - LLRP reply or null
+   */
+  async probeIPDirect(ip, listenMs = 1500) {
+    // Check cache first
+    if (this._llrpDevices.has(ip)) {
+      return { ip, cached: true, ...this._formatLLRPDevice(ip) }
+    }
+
+    await this.startUDP()
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.off('llrpReply', handler)
+        resolve(null)
+      }, listenMs)
+
+      const handler = (reply) => {
+        if (reply.ip === ip) {
+          clearTimeout(timer)
+          this.off('llrpReply', handler)
+          resolve(reply)
+        }
+      }
+      this.on('llrpReply', handler)
+
+      // Send 3 probes with spacing for reliability
+      this.sendLLRPProbe(ip)
+      setTimeout(() => this.sendLLRPProbe(ip), 200)
+      setTimeout(() => this.sendLLRPProbe(ip), 500)
+    })
+  }
+
+  _formatLLRPDevice(ip) {
+    const dev = this._llrpDevices.get(ip)
+    if (!dev) return {}
+    return { cid: dev.cid.toString('hex'), uid: dev.uid, uidStr: dev.uidStr }
   }
 
   // ─── LLRP RDM Commands ──────────────────────────────────────────────────────
