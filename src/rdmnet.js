@@ -365,39 +365,47 @@ class RDMnet extends EventEmitter {
    * @param {number} [listenMs=3000] - How long to listen
    * @returns {Promise<Array>}        - Array of { name, ip, port, txt } objects
    */
-  discoverMDNS(listenMs = 3000) {
-    return new Promise((resolve) => {
-      const MDNS_ADDR = '224.0.0.251'
-      const MDNS_PORT = 5353
-      const found     = new Map()
+  discoverMDNS(listenMs = 2000) {
+    const MDNS_ADDR = '224.0.0.251'
+    const MDNS_PORT = 5353
+    const found     = new Map()
 
+    // Hard deadline — resolves no matter what
+    const deadline = new Promise((resolve) => setTimeout(() => resolve([]), listenMs + 500))
+
+    const attempt = new Promise((resolve) => {
+      let settled = false
       const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true })
 
-      const cleanup = () => {
+      const cleanup = (result = []) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        clearTimeout(bindTimeout)
+        sock.removeAllListeners()
         try { sock.close() } catch (_) {}
-        resolve(Array.from(found.values()))
+        resolve(result)
       }
 
-      const timer = setTimeout(cleanup, listenMs)
+      // Hard timeout — fires even if bind callback never fires
+      const timer      = setTimeout(() => cleanup(Array.from(found.values())), listenMs)
+      // Bail out if bind takes more than 1 s (port 5353 held by mDNSResponder on macOS)
+      const bindTimeout = setTimeout(() => cleanup([]), 1000)
 
-      sock.on('error', () => {
-        clearTimeout(timer)
-        resolve([])
-      })
+      sock.on('error', () => cleanup([]))
 
-      sock.bind(MDNS_PORT, '0.0.0.0', () => {
-        try {
-          sock.addMembership(MDNS_ADDR)
-          sock.setMulticastTTL(255)
-        } catch (_) {}
+      sock.bind({ port: MDNS_PORT, address: '0.0.0.0', exclusive: false }, () => {
+        clearTimeout(bindTimeout)  // bind succeeded
+
+        try { sock.addMembership(MDNS_ADDR) } catch (_) {}
+        try { sock.setMulticastTTL(255) }     catch (_) {}
 
         // Build a DNS-SD query for PTR _rdmnet._tcp.local
         const query = buildMDNSQuery('_rdmnet._tcp.local')
-        sock.send(query, 0, query.length, MDNS_PORT, MDNS_ADDR, () => {})
-        // Send again after a short delay in case the first is lost
+        try { sock.send(query, 0, query.length, MDNS_PORT, MDNS_ADDR, () => {}) } catch (_) {}
         setTimeout(() => {
-          sock.send(query, 0, query.length, MDNS_PORT, MDNS_ADDR, () => {})
-        }, 500)
+          try { sock.send(query, 0, query.length, MDNS_PORT, MDNS_ADDR, () => {}) } catch (_) {}
+        }, 400)
       })
 
       sock.on('message', (msg, rinfo) => {
@@ -407,7 +415,6 @@ class RDMnet extends EventEmitter {
         // Look for A records and SRV records related to _rdmnet._tcp
         for (const record of parsed.answers.concat(parsed.additionals || [])) {
           if (record.type === 'A' && rinfo.address) {
-            // Associate IP with any previously seen SRV / PTR
             if (found.has(record.name)) {
               found.get(record.name).ip = record.data
             } else {
@@ -430,6 +437,9 @@ class RDMnet extends EventEmitter {
         }
       })
     })
+
+    // Race: whichever resolves first (attempt or hard deadline)
+    return Promise.race([attempt, deadline])
   }
 
   // ─── High-level probe ─────────────────────────────────────────────────────

@@ -504,8 +504,11 @@ class Scanner extends EventEmitter {
                   }
 
                   // mDNS scan for any RDMnet broker on the local network segment
-                  report(`  [RDMnet] Scanning for _rdmnet._tcp.local via mDNS (3 s)…`)
-                  const mdnsResults = await this.rdmnet.discoverMDNS(3000)
+                  report(`  [RDMnet] Scanning for _rdmnet._tcp.local via mDNS (2 s)…`)
+                  const mdnsResults = await Promise.race([
+                    this.rdmnet.discoverMDNS(2000),
+                    new Promise(r => setTimeout(() => r([]), 3500)),  // absolute failsafe
+                  ])
                   if (mdnsResults.length > 0) {
                     report(`  [RDMnet] mDNS found ${mdnsResults.length} RDMnet service(s):`)
                     for (const svc of mdnsResults) {
