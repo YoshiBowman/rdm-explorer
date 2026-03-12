@@ -170,7 +170,7 @@ const ACN_PID = Buffer.from('4153432d45312e313700000000000000', 'hex').slice(0, 
  *          Data:
  *            Lower UID (6 bytes)
  *            Upper UID (6 bytes)
- *            Filter (1 byte) — 0x01=client TCP inactive, 0x02=brokers only
+ *            Filter (1 byte) — 0x00=all devices, 0x01=TCP inactive only, 0x02=brokers only
  *            Known UIDs (variable, 0 entries for full range)
  *
  * NOTE: v0.2.3 tried 3-level nesting (wrapping data in a Probe Request
@@ -188,8 +188,11 @@ function buildLLRPProbeRequest(cid) {
   prPayload.fill(0x00, 0, 6)
   // Upper UID: all 0xFF (end of search range — entire UID space)
   prPayload.fill(0xFF, 6, 12)
-  // Filter: 0x03 = CLIENT_TCP_INACTIVE | BROKERS_ONLY (include everything)
-  prPayload[12] = 0x03
+  // Filter: 0x00 = no filter bits set → ALL LLRP devices respond.
+  // 0x01 = CLIENT_TCP_INACTIVE (only respond if TCP inactive)
+  // 0x02 = BROKERS_ONLY (only brokers respond — Pathport gateways are NOT brokers,
+  //         so 0x02 or 0x03 causes them to stay silent).
+  prPayload[12] = 0x00
   // No known UIDs appended — full discovery
 
   // LLRP PDU: header = Destination CID, data = probe fields (directly, no inner PDU)
