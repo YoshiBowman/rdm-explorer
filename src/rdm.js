@@ -48,25 +48,35 @@ const PID = {
 }
 
 // ─── Product Categories ───────────────────────────────────────────────────────
+// Source: ANSI E1.20 Table A-5 (via rdm-01788013.h)
 const PRODUCT_CATEGORY = {
   0x0000: 'Not Declared',
+  // Fixtures
   0x0100: 'Fixture',
   0x0101: 'Fixture — Fixed',
   0x0102: 'Fixture — Moving Yoke',
   0x0103: 'Fixture — Moving Mirror',
   0x01FF: 'Fixture — Other',
+  // Fixture Accessories
   0x0200: 'Fixture Accessory',
-  0x0201: 'Fixture Accessory — Color Scroll',
-  0x0202: 'Fixture Accessory — Color Wheel',
-  0x0203: 'Fixture Accessory — Dimmer',
-  0x0204: 'Fixture Accessory — Effect',
-  0x0205: 'Fixture Accessory — Gobo Rotator',
+  0x0201: 'Fixture Accessory — Color',        // Scrollers / Color Changers
+  0x0202: 'Fixture Accessory — Yoke',         // Yoke add-on
+  0x0203: 'Fixture Accessory — Mirror',       // Moving mirror add-on
+  0x0204: 'Fixture Accessory — Effect',       // Effects discs
+  0x0205: 'Fixture Accessory — Beam',         // Gobo rotators / iris / shutters / dousers / beam modifiers
   0x02FF: 'Fixture Accessory — Other',
+  // Projectors
   0x0300: 'Projector',
+  0x0301: 'Projector — Fixed',
+  0x0302: 'Projector — Moving Yoke',
+  0x0303: 'Projector — Moving Mirror',
+  0x03FF: 'Projector — Other',
+  // Atmospheric
   0x0400: 'Atmospheric',
-  0x0401: 'Atmospheric — Fog',
-  0x0402: 'Atmospheric — Haze',
+  0x0401: 'Atmospheric — Effect',             // Fogger / hazer / flame
+  0x0402: 'Atmospheric — Pyro',               // See E1.20 §A note
   0x04FF: 'Atmospheric — Other',
+  // Dimmers
   0x0500: 'Dimmer',
   0x0501: 'Dimmer — AC Incandescent',
   0x0502: 'Dimmer — AC Fluorescent',
@@ -76,17 +86,80 @@ const PRODUCT_CATEGORY = {
   0x0506: 'Dimmer — AC Other',
   0x0507: 'Dimmer — DC Level',
   0x0508: 'Dimmer — DC PWM',
+  0x0509: 'Dimmer — CS LED',                  // Specialized LED dimmer
   0x05FF: 'Dimmer — Other',
+  // Power
   0x0600: 'Power',
+  0x0601: 'Power — Control',                  // Contactors / power controllers
+  0x0602: 'Power — Source',                   // Generators
+  0x06FF: 'Power — Other',
+  // Scenic
   0x0700: 'Scenic',
+  0x0701: 'Scenic — Drive',                   // Rotators / kabuki drops
+  0x07FF: 'Scenic — Other',
+  // Data
   0x0800: 'Data',
+  0x0801: 'Data — Distribution',              // Splitters / repeaters / Ethernet products
+  0x0802: 'Data — Conversion',                // Protocol conversion / analog decoders
+  0x08FF: 'Data — Other',
+  // AV
   0x0900: 'AV',
+  0x0901: 'AV — Audio',
+  0x0902: 'AV — Video',
+  0x09FF: 'AV — Other',
+  // Monitor
   0x0A00: 'Monitor',
+  0x0A01: 'Monitor — AC Line Power',
+  0x0A02: 'Monitor — DC Power',
+  0x0A03: 'Monitor — Environmental',
+  0x0AFF: 'Monitor — Other',
+  // Control
   0x7000: 'Control',
-  0x7001: 'Control — Network',
-  0x7002: 'Control — Source Four',
-  0x7003: 'Control — Fiber',
+  0x7001: 'Control — Controller',
+  0x7002: 'Control — Backup Device',
+  0x70FF: 'Control — Other',
+  // Test
+  0x7100: 'Test',
+  0x7101: 'Test Equipment',
+  0x71FF: 'Test Equipment — Other',
+  // Misc
   0x7FFF: 'Other',
+}
+
+// ─── NACK Reason Codes ────────────────────────────────────────────────────────
+// Source: ANSI E1.20 Table A-17 (via rdm-01788013.h)
+// Returned in the PD of a NACK_REASON response (2-byte big-endian uint16).
+const NACK_REASON = {
+  0x0000: 'Unknown PID',
+  0x0001: 'Format Error',
+  0x0002: 'Hardware Fault',
+  0x0003: 'Proxy Reject',
+  0x0004: 'Write Protect',
+  0x0005: 'Unsupported Command Class',
+  0x0006: 'Data Out of Range',
+  0x0007: 'Buffer Full',
+  0x0008: 'Packet Size Unsupported',
+  0x0009: 'Sub-Device Out of Range',
+  0x000A: 'Proxy Buffer Full',
+  0x000B: 'Action Not Supported',   // E1.37-2 extension
+}
+
+/**
+ * Decode a NACK reason from a 2-byte PD buffer.
+ * Returns a human-readable string, or a hex code for unknown reasons.
+ */
+function nackReasonString(pd) {
+  if (!pd || pd.length < 2) return 'Unknown (no PD)'
+  const code = pd.readUInt16BE(0)
+  return NACK_REASON[code] || `Unknown (0x${code.toString(16).padStart(4, '0')})`
+}
+
+// ─── Response Type Helpers ────────────────────────────────────────────────────
+const RESPONSE_TYPE = {
+  ACK:          0x00,
+  ACK_TIMER:    0x01,
+  NACK_REASON:  0x02,
+  ACK_OVERFLOW: 0x03,
 }
 
 // ─── UIDs ─────────────────────────────────────────────────────────────────────
@@ -273,11 +346,12 @@ function parseDeviceInfo(pd) {
 }
 
 module.exports = {
-  CC, PID, PRODUCT_CATEGORY,
+  CC, PID, PRODUCT_CATEGORY, NACK_REASON, RESPONSE_TYPE,
   SOURCE_UID, BROADCAST_UID, ALL_DEVICES,
   buildPacket, buildDiscUniqueBranch, buildDiscMute, buildDiscUnMuteAll,
   buildGetRequest, buildSetRequest,
   parsePacket, parseDiscoveryResponse, parseDeviceInfo,
+  nackReasonString,
   uidToString, stringToUID,
   checksum, nextTN,
 }

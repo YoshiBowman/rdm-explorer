@@ -23,7 +23,7 @@
       <div class="logo">
         <span class="logo-icon">⬡</span>
         <span class="logo-text">RDM Explorer</span>
-        <span class="logo-version">v0.2.6</span>
+        <span class="logo-version" id="app-version">v0.3.0</span>
       </div>
     </div>
 
@@ -119,8 +119,14 @@
       <section class="sidebar-log-section">
         <h3 class="sidebar-heading sidebar-log-heading">
           Scan Log
-          <button id="copyLogBtn" class="log-copy-btn" title="Copy log to clipboard">⎘ Copy</button>
+          <span class="log-heading-btns">
+            <button id="copyLogBtn"    class="log-copy-btn" title="Copy log to clipboard">⎘ Copy</button>
+            <button id="openLogsBtn"   class="log-copy-btn" title="Open logs folder">⬡ Logs</button>
+          </span>
         </h3>
+        <div id="logFilePill" class="log-file-pill" style="display:none">
+          <span id="logFileText" class="log-file-text"></span>
+        </div>
         <div id="logBox" class="log-box"></div>
       </section>
 

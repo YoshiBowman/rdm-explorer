@@ -226,6 +226,11 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
   border: 1px solid rgba(155,114,245,0.3);
 }
 .node-manual-tag { font-size: 10px; padding: 1px 5px; border-radius: 3px; }
+.node-not-found-tag {
+  background: rgba(240,96,96,0.12) !important;
+  color: var(--red) !important;
+  border-color: rgba(240,96,96,0.3) !important;
+}
 
 /* Buttons */
 .btn {
@@ -392,7 +397,9 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
 .node-ip   { font-size: 11px; color: var(--text-muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
 .node-rdm  { font-size: 10px; color: var(--green); }
 .node-sacn-tag { font-size: 10px; color: var(--cyan); }
-.node-passive-tag { font-size: 10px; color: var(--amber); }
+.node-passive-tag  { font-size: 10px; color: var(--amber); }
+.node-checking-tag { font-size: 10px; color: var(--text-muted); font-style: italic; }
+.node-stale        { opacity: 0.4; transition: opacity 0.2s; }
 
 .node-proto-row {
   display: flex;
@@ -495,9 +502,15 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
   margin-bottom: 6px;
 }
 
-/* Copy-log button */
-.log-copy-btn {
+/* Log heading — group copy + open-folder buttons */
+.log-heading-btns {
+  display: flex;
+  gap: 4px;
   margin-left: auto;
+}
+
+/* Copy-log / open-logs buttons */
+.log-copy-btn {
   background: none;
   border: 1px solid var(--border);
   border-radius: 3px;
@@ -512,6 +525,23 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
 }
 .log-copy-btn:hover  { color: var(--accent); border-color: var(--accent); }
 .log-copy-btn.copied { color: var(--green);  border-color: var(--green);  }
+
+/* Log file pill — shows the filename of the last saved scan log */
+.log-file-pill {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  margin-bottom: 5px;
+  padding: 2px 6px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+.log-file-text { opacity: 0.75; }
 
 .log-box {
   flex: 1;

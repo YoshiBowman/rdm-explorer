@@ -9,6 +9,9 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('rdm', {
+  // ── App info ────────────────────────────────────────────────────────────────
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+
   // ── Discovery & Scanning ────────────────────────────────────────────────────
   getNetworkInterfaces: ()                        => ipcRenderer.invoke('get-network-interfaces'),
   startScan:            (bindAddress, protocol, broadcastAddress, subnetOverride) => ipcRenderer.invoke('start-scan', bindAddress, protocol, broadcastAddress, subnetOverride),
@@ -26,6 +29,11 @@ contextBridge.exposeInMainWorld('rdm', {
 
   // ── Updates ─────────────────────────────────────────────────────────────────
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+
+  // ── Logs ─────────────────────────────────────────────────────────────────
+  openLogsFolder: ()     => ipcRenderer.invoke('open-logs-folder'),
+  listLogFiles:   ()     => ipcRenderer.invoke('list-log-files'),
+  readLatestLog:  ()     => ipcRenderer.invoke('read-latest-log'),
 
   // ── Events (main → renderer) ─────────────────────────────────────────────
   onProgress:       (cb) => ipcRenderer.on('scan-progress',     (_, d) => cb(d)),

@@ -6,13 +6,15 @@
 
 'use strict'
 
-const { app, BrowserWindow, ipcMain } = require('electron')
+const { app, BrowserWindow, ipcMain, shell } = require('electron')
 const path  = require('path')
 const os    = require('os')
 const https = require('https')
-const Scanner = require('./src/scanner')
+const Scanner    = require('./src/scanner')
+const ScanLogger = require('./src/logger')
 
-const PKG = require('./package.json')
+const PKG     = require('./package.json')
+const LOGS_DIR = path.join(__dirname, 'logs')
 
 let mainWindow  = null
 let scanner     = null
@@ -46,7 +48,7 @@ function createWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null
-    if (scanner) { scanner.stop(); scanner = null }
+    if (scanner) { scanner.destroy(); scanner = null }
   })
 }
 
@@ -105,6 +107,8 @@ function sanitize(obj) {
 
 // ─── Network Interfaces ───────────────────────────────────────────────────────
 
+ipcMain.handle('get-app-version', () => app.getVersion())
+
 ipcMain.handle('get-network-interfaces', () => {
   const ifaces = os.networkInterfaces()
   const results = [{ label: 'All interfaces (0.0.0.0)', address: '0.0.0.0', broadcast: '255.255.255.255' }]
@@ -139,7 +143,6 @@ ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0', protocol = 
   if (bindAddress === '0.0.0.0') {
     broadcasts = ['255.255.255.255']  // limited broadcast — reaches all NICs
     const ifaces = os.networkInterfaces()
-    const has10 = false
     for (const addrs of Object.values(ifaces)) {
       for (const addr of addrs) {
         if (addr.family === 'IPv4' && !addr.internal) {
@@ -170,20 +173,43 @@ ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0', protocol = 
     broadcasts = [broadcastAddress]
   }
 
+  // ── Start scan logger ────────────────────────────────────────────────────
+  const logger = new ScanLogger(LOGS_DIR, {
+    appVersion:     PKG.version,
+    bindAddress,
+    protocol,
+    broadcasts,
+    subnetOverride,
+    manualNodes,
+  })
+  logger.open()
+
   scanner = new Scanner()
 
-  scanner.on('nodeFound',  (node)   => send('node-found',     sanitize(node)))
-  scanner.on('deviceFound',(device) => send('device-found',   sanitize(device)))
-  scanner.on('progress',   (data)   => send('scan-progress',  sanitize(data)))
-  scanner.on('error',      (err)    => send('scan-error',     { message: err.message }))
+  scanner.on('nodeFound',   (node)   => { logger.nodeFound(node);         send('node-found',    sanitize(node))   })
+  scanner.on('deviceFound', (device) => { logger.deviceFound(device);     send('device-found',  sanitize(device)) })
+  scanner.on('progress',    (data)   => { logger.progress(data);          send('scan-progress', sanitize(data))   })
+  scanner.on('error',       (err)    => { logger.error(err);              send('scan-error',    { message: err.message }) })
+
+  // Also log crashes that arrive via uncaughtException (they re-fire the scan-error channel)
+  const crashLogger = (err) => logger.error(`[crash] ${err.message || err}\n${err.stack || ''}`)
+  process.once('uncaughtException',  crashLogger)
+  process.once('unhandledRejection', crashLogger)
 
   try {
     await scanner.start(bindAddress, protocol, broadcasts, subnetOverride)
     scanner.setManualNodes(manualNodes)
     const devices = await scanner.fullScan(bindAddress, null, protocol)
-    send('scan-done', { deviceCount: devices.length })
-    return { ok: true, deviceCount: devices.length }
+    logger.close({ deviceCount: devices.length })
+    process.removeListener('uncaughtException',  crashLogger)
+    process.removeListener('unhandledRejection', crashLogger)
+    send('scan-done', { deviceCount: devices.length, logPath: logger.filePath })
+    return { ok: true, deviceCount: devices.length, logPath: logger.filePath }
   } catch (err) {
+    logger.error(err)
+    logger.close({ deviceCount: 0, error: err.message })
+    process.removeListener('uncaughtException',  crashLogger)
+    process.removeListener('unhandledRejection', crashLogger)
     send('scan-error', { message: err.message })
     return { ok: false, error: err.message }
   }
@@ -245,6 +271,43 @@ ipcMain.handle('add-manual-node', (_event, ip, name) => {
 ipcMain.handle('remove-manual-node', (_event, ip) => {
   manualNodes = manualNodes.filter(n => n.ip !== ip)
   return { ok: true }
+})
+
+// ─── Logs ─────────────────────────────────────────────────────────────────────
+
+/** Open the logs folder in the OS file manager. */
+ipcMain.handle('open-logs-folder', () => {
+  const fs = require('fs')
+  if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true })
+  shell.openPath(LOGS_DIR)
+  return { ok: true, path: LOGS_DIR }
+})
+
+/** Return a list of scan log files, newest first. */
+ipcMain.handle('list-log-files', () => {
+  const fs = require('fs')
+  if (!fs.existsSync(LOGS_DIR)) return []
+  return fs.readdirSync(LOGS_DIR)
+    .filter(f => f.startsWith('scan-') && f.endsWith('.log'))
+    .map(f => {
+      const full = require('path').join(LOGS_DIR, f)
+      const stat = fs.statSync(full)
+      return { name: f, path: full, sizeBytes: stat.size, mtimeMs: stat.mtimeMs }
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+})
+
+/** Read the most recent log file and return its contents as a string. */
+ipcMain.handle('read-latest-log', () => {
+  const fs = require('fs')
+  if (!fs.existsSync(LOGS_DIR)) return null
+  const files = fs.readdirSync(LOGS_DIR)
+    .filter(f => f.startsWith('scan-') && f.endsWith('.log'))
+    .map(f => ({ name: f, mtime: fs.statSync(require('path').join(LOGS_DIR, f)).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime)
+  if (files.length === 0) return null
+  const latest = require('path').join(LOGS_DIR, files[0].name)
+  return { name: files[0].name, content: fs.readFileSync(latest, 'utf8') }
 })
 
 // ─── Update Checker ──────────────────────────────────────────────────────────

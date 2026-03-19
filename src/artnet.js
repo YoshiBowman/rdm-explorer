@@ -14,10 +14,12 @@ const ARTNET_HEADER = Buffer.from([0x41, 0x72, 0x74, 0x2D, 0x4E, 0x65, 0x74, 0x0
 const PROTOCOL_VERSION = 14
 
 const OP = {
-  POLL:       0x2000,
-  POLL_REPLY: 0x2100,
-  DMX:        0x5000,
-  RDM:        0x8002,
+  POLL:        0x2000,
+  POLL_REPLY:  0x2100,
+  DMX:         0x5000,
+  RDM:         0x8002,
+  TOD_REQUEST: 0x8010,  // ArtTodRequest  – controller → node:  "give me your RDM table"
+  TOD_DATA:    0x8011,  // ArtTodData     – node → controller:  "here are my RDM UIDs"
 }
 
 class ArtNet extends EventEmitter {
@@ -124,6 +126,42 @@ class ArtNet extends EventEmitter {
     this._send(buf, nodeIP, ARTNET_PORT)
   }
 
+  /**
+   * Send an ArtTodRequest to ask a node for its RDM Table of Devices (TOD).
+   * Per Art-Net 4 §ArtTodRequest: AddCount = 0 means "all output universes".
+   * The node replies with one or more ArtTodData packets.
+   *
+   * @param {string}   ip      - Target node IP (unicast)
+   * @param {number}   net     - Net switch (0-127); usually 0
+   * @param {number[]} subUnis - SubUni byte values to request ([] = all universes)
+   */
+  sendArtTodRequest(ip, net, subUnis = []) {
+    const addCount = Math.min(subUnis.length, 32)
+    // Layout:
+    //  0-7   "Art-Net\0"   (8)
+    //  8-9   OpCode        (2 LE)
+    // 10-11  ProtVer       (2 BE)
+    // 12     Filler1       (1)
+    // 13     Filler2       (1)
+    // 14-20  Spare         (7)
+    // 21     Net           (1)
+    // 22     Command       (1) 0x00 = ArtTodFull
+    // 23     AddCount      (1) 0 = all universes
+    // 24+    Address[]     (addCount)
+    const buf = Buffer.alloc(24 + addCount)
+    ARTNET_HEADER.copy(buf, 0)
+    buf.writeUInt16LE(OP.TOD_REQUEST, 8)
+    buf.writeUInt16BE(PROTOCOL_VERSION, 10)
+    buf[12] = 0x00          // Filler1
+    buf[13] = 0x00          // Filler2
+    buf.fill(0x00, 14, 21)  // Spare (7 bytes)
+    buf[21] = net & 0x7F    // Net
+    buf[22] = 0x00          // Command: ArtTodFull
+    buf[23] = addCount      // 0 = "all output universes"
+    for (let i = 0; i < addCount; i++) buf[24 + i] = subUnis[i] & 0xFF
+    this._send(buf, ip, ARTNET_PORT)
+  }
+
   _send(buf, address, port) {
     if (!this.socket) return
     this.socket.send(buf, 0, buf.length, port, address)
@@ -168,7 +206,51 @@ class ArtNet extends EventEmitter {
           this.emit('artRdmData', msg.slice(19), rinfo)
         }
         break
+      case OP.TOD_DATA: {
+        const tod = this._parseArtTodData(msg, rinfo)
+        if (tod) this.emit('artTodData', tod)
+        break
+      }
     }
+  }
+
+  /**
+   * Parse an ArtTodData (0x8011) packet.
+   * Layout (Art-Net 4 spec):
+   *   0-7   "Art-Net\0"
+   *   8-9   OpCode  0x8011
+   *  10-11  ProtVer
+   *  12     RdmVer  0x01
+   *  13     Port    (1-4)
+   *  14-19  Spare   (6 bytes)
+   *  20     BindIndex
+   *  21     Net
+   *  22     Command  0x00=Full 0x01=Nak 0x02=TimeOut
+   *  23     SubUni   ((sub<<4)|uni)
+   *  24-25  UidTotal (BE)  – total UIDs in this node's TOD
+   *  26     BlockCount     – which block this is (0-based)
+   *  27     UidCount       – UIDs in this packet (max 20)
+   *  28+    Tod[UidCount][6]
+   */
+  _parseArtTodData(msg, rinfo) {
+    if (msg.length < 28) return null
+    const port       = msg[13]
+    const bindIndex  = msg[20]
+    const net        = msg[21] & 0x7F
+    const command    = msg[22]
+    const subUni     = msg[23]
+    const sub        = (subUni >> 4) & 0x0F
+    const uni        = subUni & 0x0F
+    const uidTotal   = msg.readUInt16BE(24)
+    const blockCount = msg[26]
+    const uidCount   = Math.min(msg[27], 20)
+    const uids = []
+    for (let i = 0; i < uidCount; i++) {
+      const off = 28 + i * 6
+      if (off + 6 > msg.length) break
+      uids.push(msg.slice(off, off + 6))
+    }
+    return { ip: rinfo.address, port, bindIndex, net, sub, uni, command, uidTotal, blockCount, uidCount, uids }
   }
 
   /**

@@ -155,8 +155,9 @@ const ACN_PID = Buffer.from('4153432d45312e313700000000000000', 'hex').slice(0, 
  * Build an E1.33 LLRP Probe Request PDU.
  * Sent via UDP multicast/unicast to discover RDMnet devices and brokers.
  *
- * Per ANSI E1.33-2019 §5.4.2, the structure is TWO levels of PDU
- * nesting with the probe request fields directly in the LLRP data:
+ * Per ANSI E1.33-2019 §5.4.2, the CORRECT structure is THREE levels of PDU
+ * nesting — the probe fields live inside a Probe Request Data PDU which is
+ * itself the data of the LLRP PDU:
  *
  *   ACN Preamble (16 bytes)
  *   Root Layer PDU:
@@ -167,40 +168,47 @@ const ACN_PID = Buffer.from('4153432d45312e313700000000000000', 'hex').slice(0, 
  *          Flags+Length (2)
  *          Vector = VECTOR_LLRP_PROBE_REQUEST (0x00000001) (4 bytes)
  *          Header = Destination CID (16 bytes) — LLRP Broadcast CID
- *          Data:
- *            Lower UID (6 bytes)
- *            Upper UID (6 bytes)
- *            Filter (1 byte) — 0x00=all devices, 0x01=TCP inactive only, 0x02=brokers only
- *            Known UIDs (variable, 0 entries for full range)
+ *          └─ Probe Request Data PDU:
+ *               Flags+Length (2)
+ *               Vector = VECTOR_PROBE_REQUEST_DATA (0x00000001) (4 bytes)
+ *               Header = (none, 0 bytes)
+ *               Data:
+ *                 Lower UID (6 bytes)
+ *                 Upper UID (6 bytes)
+ *                 Filter (2 bytes, uint16) — 0x0000=all devices, 0x0001=TCP inactive,
+ *                                             0x0002=brokers only
+ *                 Known UIDs (variable, 0 entries for full range)
  *
- * NOTE: v0.2.3 tried 3-level nesting (wrapping data in a Probe Request
- * Data PDU with its own flags+length+vector).  This caused Pathport nodes
- * to briefly go offline — the extra PDU header bytes were misinterpreted
- * by the firmware.  Reverted to the simpler 2-level structure.
- *
- * Filter is 1 byte per the Wireshark dissector field definition
- * (hf_rdmnet_llrp_probe_request_filter uses FT_UINT8).
+ * HISTORY:
+ *   v0.2.3: Used 3-level nesting but also bound to port 5569 — nodes crashed.
+ *   v0.2.4: Removed inner PDU to 2-level. Crash stopped but probes got no replies.
+ *   v0.2.5: Fixed actual crash cause: port 5569 binding → switched to port 0.
+ *   v0.2.7: Restored correct 3-level nesting (safe now that port 0 is used).
+ *           The v0.2.3 crash was caused by port 5569 conflict, NOT the 3-level
+ *           PDU structure.  Pathport nodes silently discard 2-level probes.
+ *           Also fixed filter field: was 1 byte (uint8), must be 2 bytes (uint16)
+ *           per E1.33-2019 §5.4.2.1 Table 5-5.
  */
 function buildLLRPProbeRequest(cid) {
-  // Probe request payload: lower UID(6) + upper UID(6) + filter(1) = 13 bytes
-  const prPayload = Buffer.alloc(13)
-  // Lower UID: all zeros (start of search range)
-  prPayload.fill(0x00, 0, 6)
-  // Upper UID: all 0xFF (end of search range — entire UID space)
-  prPayload.fill(0xFF, 6, 12)
-  // Filter: 0x00 = no filter bits set → ALL LLRP devices respond.
-  // 0x01 = CLIENT_TCP_INACTIVE (only respond if TCP inactive)
-  // 0x02 = BROKERS_ONLY (only brokers respond — Pathport gateways are NOT brokers,
-  //         so 0x02 or 0x03 causes them to stay silent).
-  prPayload[12] = 0x00
+  // Probe request fields per E1.33-2019 §5.4.2.1 Table 5-5:
+  //   Lower UID Bound (6) + Upper UID Bound (6) + Filter (2, uint16) = 14 bytes
+  const prFields = Buffer.alloc(14)
+  prFields.fill(0x00, 0, 6)          // Lower UID: all zeros (start of range)
+  prFields.fill(0xFF, 6, 12)          // Upper UID: all 0xFF (end of range)
+  prFields.writeUInt16BE(0x0000, 12)  // Filter: 0x0000 = all LLRP devices respond
+  //   Bit 0 = CLIENT_TCP_INACTIVE (1 = only respond if no active TCP connection)
+  //   Bit 1 = BROKERS_ONLY        (1 = only brokers respond; Pathport = gateway,
+  //           not a broker, so setting this bit silences it — was the v0.2.0 bug)
   // No known UIDs appended — full discovery
 
-  // LLRP PDU: header = Destination CID, data = probe fields (directly, no inner PDU)
-  // For broadcast probes, Dest CID = LLRP Broadcast CID per E1.33-2019 §5.3.
-  const llrpPDU  = buildPDU(VECTOR_LLRP_PROBE_REQUEST, LLRP_BROADCAST_CID, prPayload)
+  // Inner Probe Request Data PDU (no header, data = probe fields)
+  const prPDU   = buildPDU(VECTOR_PROBE_REQUEST_DATA, Buffer.alloc(0), prFields)
+
+  // LLRP PDU: header = Dest CID (LLRP Broadcast CID), data = inner prPDU
+  const llrpPDU = buildPDU(VECTOR_LLRP_PROBE_REQUEST, LLRP_BROADCAST_CID, prPDU)
 
   // Root Layer PDU: header = our CID, data = LLRP PDU
-  const rootPDU  = buildPDU(VECTOR_ROOT_LLRP, cid, llrpPDU)
+  const rootPDU = buildPDU(VECTOR_ROOT_LLRP, cid, llrpPDU)
 
   const pre = Buffer.alloc(16)
   pre.writeUInt16BE(0x0010, 0)  // preamble size
@@ -217,15 +225,25 @@ function buildLLRPProbeRequest(cid) {
  * Wraps a standard RDM packet inside LLRP for direct device communication
  * bypassing the broker.  Sent via UDP unicast to the target device.
  *
+ * Per E1.33-2019 §5.4.4, the LLRP RDM CMD PDU data contains an inner
+ * RDM Command PDU (vector = VECTOR_RDM_CMD_RD_DATA = 0x01, no header):
+ *
+ *   Root PDU (vector=ROOT_LLRP, header=our CID):
+ *     LLRP PDU (vector=LLRP_RDM_CMD=0x03, header=destCID):
+ *       RDM Command PDU (vector=0x01, no header):
+ *         RDM packet bytes (starting with 0xCC)
+ *
  * @param {Buffer} cid       - Our CID (16 bytes)
  * @param {Buffer} destCID   - Target device CID (16 bytes, from LLRP probe reply)
  * @param {Buffer} rdmPacket - Complete RDM packet (starting with 0xCC)
  */
 function buildLLRPRdmCommand(cid, destCID, rdmPacket) {
-  // LLRP layer: vector = RDM_CMD, header = destination CID, data = raw RDM packet
-  // (2-level nesting — RDM packet goes directly in LLRP data, no inner PDU wrapper)
-  const llrpPDU = buildPDU(VECTOR_LLRP_RDM_CMD, destCID, rdmPacket)
-  const rootPDU = buildPDU(VECTOR_ROOT_LLRP, cid, llrpPDU)
+  // Inner RDM Command PDU: no header, data = raw RDM packet
+  const rdmCmdPDU = buildPDU(VECTOR_RDM_CMD_RD_DATA, Buffer.alloc(0), rdmPacket)
+
+  // LLRP PDU: vector = LLRP_RDM_CMD, header = destination CID, data = rdmCmdPDU
+  const llrpPDU   = buildPDU(VECTOR_LLRP_RDM_CMD, destCID, rdmCmdPDU)
+  const rootPDU   = buildPDU(VECTOR_ROOT_LLRP, cid, llrpPDU)
 
   const pre = Buffer.alloc(16)
   pre.writeUInt16BE(0x0010, 0)
@@ -376,16 +394,25 @@ function parseACNPacket(buf) {
 
     if (llrpVec === VECTOR_LLRP_PROBE_REPLY) {
       result.type = 'llrp_probe_reply'
-      // Probe Reply: UID(6) + HW Address(6) + Component Type(1) = 13 bytes
-      // Data is directly in LLRP PDU (no inner PDU wrapper)
-      if (llrpData.length >= 6) {
-        result.uid  = llrpData.slice(0, 6).toString('hex').toUpperCase()
+      // E1.33 §5.4.3: LLRP data contains a Probe Reply Data PDU (3-level).
+      // Detect the inner PDU by checking the top nibble of byte[0]:
+      //   - ACN PDU flags byte always has top nibble = 0x7 (E1.17 §6.2.2)
+      //   - UID manufacturer IDs are 15-bit ESTA IDs (MSB always 0), so first
+      //     byte of a direct UID is 0x00–0x7F and top nibble is never 0x7
+      // This lets us handle both 3-level (spec-compliant) and 2-level fallback.
+      let uidOff = 0
+      if (llrpData.length >= 7 && (llrpData[0] & 0xF0) === 0x70) {
+        // 3-level: inner PDU header = flags+len(2) + vector(4) = 6 bytes; skip it
+        uidOff = 6
+      }
+      if (llrpData.length >= uidOff + 6) {
+        result.uid    = llrpData.slice(uidOff, uidOff + 6).toString('hex').toUpperCase()
         result.uidStr = `${result.uid.slice(0,4)}:${result.uid.slice(4)}`
-        if (llrpData.length >= 12) {
-          result.hwAddr = llrpData.slice(6, 12).toString('hex').match(/../g).join(':')
+        if (llrpData.length >= uidOff + 12) {
+          result.hwAddr = llrpData.slice(uidOff + 6, uidOff + 12).toString('hex').match(/../g).join(':')
         }
-        if (llrpData.length >= 13) {
-          result.componentType = llrpData[12]
+        if (llrpData.length >= uidOff + 13) {
+          result.componentType = llrpData[uidOff + 12]
         }
       }
     } else if (llrpVec === VECTOR_LLRP_PROBE_REQUEST) {
@@ -393,8 +420,14 @@ function parseACNPacket(buf) {
     } else if (llrpVec === VECTOR_LLRP_RDM_CMD) {
       result.type = 'llrp_rdm_cmd'
       result.destCID = llrpDestCID.toString('hex')
-      // LLRP RDM CMD data = raw RDM packet (directly in LLRP data)
-      result.rdmData = llrpData
+      // E1.33 §5.4.4: LLRP RDM CMD data contains an inner RDM Command PDU.
+      // Detect the inner PDU by the ACN flags nibble (same logic as probe reply above).
+      let rdmOff = 0
+      if (llrpData.length >= 7 && (llrpData[0] & 0xF0) === 0x70) {
+        // 3-level: skip inner PDU header = flags+len(2) + vector(4) = 6 bytes
+        rdmOff = 6
+      }
+      result.rdmData = llrpData.slice(rdmOff)
     }
   }
 
@@ -525,13 +558,66 @@ function parseTCPStream(buf) {
 class RDMnet extends EventEmitter {
   constructor() {
     super()
-    this.cid         = makeCID()
-    this.uid         = makeUID()
-    this.socket      = null   // UDP for LLRP
-    this.tcpSockets  = new Map()  // ip → { socket, state, buf, callbacks }
-    this._brokers    = new Map()  // ip → broker info
-    this._rptSeq     = 1          // RPT sequence number counter
-    this._llrpDevices = new Map() // ip → { cid (Buffer), uid, uidStr }
+    this.cid          = makeCID()
+    this.uid          = makeUID()
+    this.socket       = null   // UDP for LLRP — ephemeral port (for sending)
+    this.socket5569   = null   // UDP listener on port 5569 (catches non-spec-compliant replies)
+    this.tcpSockets   = new Map()  // ip → { socket, state, buf, callbacks }
+    this._brokers     = new Map()  // ip → broker info
+    this._rptSeq      = 1          // RPT sequence number counter
+    this._llrpDevices = new Map()  // ip → { cid (Buffer), uid, uidStr }
+
+    // ── Diagnostic raw-packet watch (mirrors artnet.js watchIP/stopWatchIP) ──
+    // Records ALL UDP packets received on the LLRP port from the watched IP,
+    // regardless of whether they parse as valid ACN.  Use watchIP(ip) before
+    // the probe and stopWatchIP() after to diagnose "is the Pathport responding
+    // at all?"
+    this._watchedIP      = null
+    this._watchedCount   = 0
+    this._watchedSamples = []
+  }
+
+  // ─── Diagnostic watch ───────────────────────────────────────────────────────
+
+  /**
+   * Start recording ALL raw UDP packets from a specific IP on the LLRP socket.
+   * Useful for diagnosing whether a node responds to LLRP at all.
+   * @param {string} ip
+   */
+  watchIP(ip) {
+    this._watchedIP      = ip
+    this._watchedCount   = 0
+    this._watchedSamples = []
+  }
+
+  /**
+   * Stop watching and return diagnostic results.
+   * @returns {{ count: number, samples: Array }}
+   */
+  stopWatchIP() {
+    const result = { count: this._watchedCount, samples: this._watchedSamples }
+    this._watchedIP      = null
+    this._watchedCount   = 0
+    this._watchedSamples = []
+    return result
+  }
+
+  /** Internal: record a raw packet from the watched IP. */
+  _recordRawPacket(msg, rinfo) {
+    // Always log to console for diagnostics regardless of watchIP
+    console.log(`[LLRP RECV] ${msg.length}B from ${rinfo.address}:${rinfo.port} | ${msg.slice(0, Math.min(32, msg.length)).toString('hex').toUpperCase()}`)
+
+    if (!this._watchedIP || rinfo.address !== this._watchedIP) return
+    this._watchedCount++
+    if (this._watchedSamples.length < 4) {
+      const isACN = msg.length >= 16 && msg.slice(4, 16).equals(ACN_PID)
+      this._watchedSamples.push({
+        len:   msg.length,
+        port:  rinfo.port,
+        hex:   msg.slice(0, Math.min(32, msg.length)).toString('hex').toUpperCase(),
+        isACN,
+      })
+    }
   }
 
   // ─── LLRP UDP Probe ────────────────────────────────────────────────────────
@@ -552,15 +638,24 @@ class RDMnet extends EventEmitter {
     return new Promise((resolve, reject) => {
       if (this.socket) return resolve()
 
+      // ── Primary socket: ephemeral port (for SENDING probes) ──────────────────
+      // We send probes from an ephemeral port to avoid crashing the Pathport
+      // (binding to port 5569 caused node instability in v0.2.3).
+      // E1.33 §5.4.3 requires probe replies to go back to the source IP:port,
+      // so spec-compliant devices will reply to this ephemeral port.
       this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
 
-      this.socket.on('message', (msg, rinfo) => {
+      const handleIncoming = (msg, rinfo) => {
+        // Raw diagnostic recording — captures ALL packets before any filtering.
+        // Tells us whether the Pathport is responding at all, even if the
+        // packet format is unexpected.
+        this._recordRawPacket(msg, rinfo)
+
         try {
           const pkt = parseACNPacket(msg)
           if (!pkt) return
 
           if (pkt.type === 'llrp_probe_reply') {
-            // Cache the device's CID for later LLRP RDM commands
             if (pkt.cid && pkt.uid) {
               this._llrpDevices.set(rinfo.address, {
                 cid: Buffer.from(pkt.cid, 'hex'),
@@ -573,25 +668,39 @@ class RDMnet extends EventEmitter {
             this.emit('llrpRdmResponse', { ip: rinfo.address, ...pkt })
           }
         } catch (_) {}
-      })
+      }
 
+      this.socket.on('message', handleIncoming)
       this.socket.on('error', (err) => {
-        // Only emit if someone is listening — otherwise swallow to prevent crash
         if (this.listenerCount('error') > 0) this.emit('error', err)
       })
 
-      // Bind to EPHEMERAL port (port 0) — NOT port 5569.
-      // Binding to 5569 caused Pathport nodes to go offline, likely because
-      // our socket on that port conflicted with their LLRP listener.
-      // LLRP replies are unicast back to our source port, so ephemeral works.
       this.socket.bind({ port: 0, address: '0.0.0.0' }, () => {
         try { this.socket.setBroadcast(true) } catch (_) {}
-        // E1.33 requires multicastTTL(20) for LLRP traffic
         try { this.socket.setMulticastTTL(20) } catch (_) {}
-        // Set the outgoing multicast interface so probes go out the right NIC
         if (localIP && localIP !== '0.0.0.0') {
           try { this.socket.setMulticastInterface(localIP) } catch (_) {}
         }
+
+        // ── Secondary socket: port 5569 (for RECEIVING non-spec replies) ───────
+        // Some LLRP implementations (older Pathway firmware) send probe replies
+        // to UDP port 5569 rather than the probe's source port, which violates
+        // E1.33 §5.4.3 but is a known field behaviour.  We open a second socket
+        // on port 5569 with reuseAddr so replies go to EITHER port.  If port 5569
+        // is already bound by another process, we skip it and rely on the
+        // ephemeral socket alone.
+        if (!this.socket5569) {
+          const s = dgram.createSocket({ type: 'udp4', reuseAddr: true })
+          s.on('message', handleIncoming)
+          s.on('error', () => {})  // swallow; this socket is best-effort
+          s.bind({ port: RDMNET_PORT, address: '0.0.0.0' }, () => {
+            try { s.addMembership(LLRP_MULTICAST) } catch (_) {}
+            this.socket5569 = s
+          })
+          // If bind fails (port in use) the error handler swallows it and
+          // socket5569 stays null — that's fine, ephemeral still works.
+        }
+
         resolve()
       })
     })
@@ -602,6 +711,10 @@ class RDMnet extends EventEmitter {
       try { this.socket.close() } catch (_) {}
       this.socket = null
     }
+    if (this.socket5569) {
+      try { this.socket5569.close() } catch (_) {}
+      this.socket5569 = null
+    }
   }
 
   /**
@@ -611,6 +724,8 @@ class RDMnet extends EventEmitter {
   sendLLRPProbe(address) {
     if (!this.socket) return
     const pkt = buildLLRPProbeRequest(this.cid)
+    // Hex-dump to console for diagnostics — visible in Electron DevTools (F12)
+    console.log(`[LLRP SEND] ${pkt.length}B probe → ${address}:${RDMNET_PORT} | ${pkt.toString('hex').toUpperCase()}`)
     this.socket.send(pkt, 0, pkt.length, RDMNET_PORT, address, () => {})
   }
 

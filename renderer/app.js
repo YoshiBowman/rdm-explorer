@@ -20,6 +20,13 @@ const State = {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
+  // Dynamically load the version from package.json via main process
+  // so the UI never shows a stale hardcoded version number.
+  try {
+    const ver = await window.rdm.getAppVersion()
+    if (ver) document.getElementById('app-version').textContent = `v${ver}`
+  } catch (_) {}
+
   await loadInterfaces()
   await loadManualNodes()
 
@@ -77,6 +84,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Copy log to clipboard
   document.getElementById('copyLogBtn').addEventListener('click', () => App.copyLog())
 
+  // Open logs folder in OS file manager
+  document.getElementById('openLogsBtn').addEventListener('click', () => window.rdm.openLogsFolder())
+
   // Hide / show passive ArtDmx sources in the node list
   document.getElementById('hidePassiveBtn').addEventListener('click', () => App.toggleHidePassive())
 })
@@ -85,18 +95,9 @@ window.addEventListener('DOMContentLoaded', async () => {
 async function loadManualNodes() {
   const nodes = await window.rdm.getManualNodes()
   renderManualNodes(nodes)
-  // Also populate the main Nodes list with any already-saved manual nodes
-  for (const n of (nodes || [])) {
-    addNode({
-      ip:          n.ip,
-      shortName:   n.name || `Manual @ ${n.ip}`,
-      longName:    n.name ? `${n.name} (${n.ip})` : `Manually added — ${n.ip}`,
-      protocol:    'artnet-manual',
-      supportsRDM: true,
-      manual:      true,
-      universes:   [],
-    })
-  }
+  // Manual nodes are NOT added to the main Nodes panel here.
+  // They appear there only after a scan — either with real info when found,
+  // or with a "not found" indicator when the scan couldn't reach them.
 }
 
 function renderManualNodes(nodes) {
@@ -141,23 +142,11 @@ const App = {
     if (State.scanning) return
     State.scanning = true
     State.isDemo   = false
-    clearAll()
+    clearForScan()
     setScanningUI(true)
     log(`Starting scan (${protocolLabel()})…`)
-    // Re-add manually configured nodes to the Nodes list so they're visible
-    // during the scan, even before the scanner emits nodeFound for them.
-    const savedManual = await window.rdm.getManualNodes()
-    for (const n of (savedManual || [])) {
-      addNode({
-        ip:          n.ip,
-        shortName:   n.name || `Manual @ ${n.ip}`,
-        longName:    n.name ? `${n.name} (${n.ip})` : `Manually added — ${n.ip}`,
-        protocol:    'artnet-manual',
-        supportsRDM: true,
-        manual:      true,
-        universes:   [],
-      })
-    }
+    // Manual nodes are intentionally NOT pre-populated here.
+    // They surface in the Nodes panel after the scan confirms (or fails to find) them.
 
     const sel = document.getElementById('ifaceSelect')
     const bindAddress = sel.value
@@ -176,16 +165,7 @@ const App = {
       document.getElementById('manualNodeName').value = ''
       const nodes = await window.rdm.getManualNodes()
       renderManualNodes(nodes)
-      // Surface this node in the main Nodes list immediately (don't wait for scan)
-      addNode({
-        ip,
-        shortName:   name || `Manual @ ${ip}`,
-        longName:    name ? `${name} (${ip})` : `Manually added — ${ip}`,
-        protocol:    'artnet-manual',
-        supportsRDM: true,
-        manual:      true,
-        universes:   [],
-      })
+      // Node will appear in the main Nodes panel after the next scan.
     } else {
       log(`Could not add node: ${res.error}`, 'err')
     }
@@ -193,8 +173,10 @@ const App = {
 
   async removeManualNode(ip) {
     await window.rdm.removeManualNode(ip)
-    // Remove from the main Nodes list as well
-    State.nodes = State.nodes.filter(n => !(n.ip === ip && n.protocol === 'artnet-manual'))
+    // Remove from the main Nodes panel by IP only.
+    // The node might have been discovered via ArtPollReply (protocol = 'artnet')
+    // rather than the manual placeholder — filtering by IP covers both cases.
+    State.nodes = State.nodes.filter(n => n.ip !== ip)
     rerenderNodeList()
     const nodes = await window.rdm.getManualNodes()
     renderManualNodes(nodes)
@@ -353,13 +335,55 @@ function protocolLabel() {
 }
 
 // ─── Scan lifecycle helpers ───────────────────────────────────────────────────
-function scanFinished(data, isError = false) {
+async function scanFinished(data, isError = false) {
   State.scanning = false
   setScanningUI(false)
+
+  // Remove any nodes that were marked stale at scan start and never rediscovered.
+  // (Nodes that responded this scan had their stale flag cleared by addNode().)
+  const staleBefore = State.nodes.filter(n => n.stale).length
+  State.nodes = State.nodes.filter(n => !n.stale)
+  if (staleBefore > 0) rerenderNodeList()
+
+  // After the scan, surface manual nodes in the Nodes panel.
+  // - Nodes that responded to ArtPoll are already in State.nodes with real data.
+  // - Nodes that the scan couldn't reach get added with notFound: true so the
+  //   user can see which ones failed rather than them silently disappearing.
+  const savedManual = await window.rdm.getManualNodes()
+  let changed = false
+  for (const mn of (savedManual || [])) {
+    if (!State.nodes.find(n => n.ip === mn.ip)) {
+      State.nodes.push({
+        ip:          mn.ip,
+        shortName:   mn.name || `Manual @ ${mn.ip}`,
+        longName:    mn.name ? `${mn.name} (${mn.ip})` : `Manually added — ${mn.ip}`,
+        protocol:    null,   // unknown — scan never confirmed the protocol
+        supportsRDM: null,   // unknown — scan never confirmed RDM support
+        manual:      true,
+        notFound:    true,
+      })
+      changed = true
+    }
+  }
+  if (changed) rerenderNodeList()
+
   if (!isError && data) {
     setStatus(`Found ${data.deviceCount} device(s)`, 'done')
   } else if (isError) {
     setStatus('Scan error', 'error')
+  }
+
+  // Show the log file path as a small pill below the Scan Log heading
+  if (data && data.logPath) {
+    const pill = document.getElementById('logFilePill')
+    const text = document.getElementById('logFileText')
+    if (pill && text) {
+      // Show just the filename, not the full path
+      const filename = data.logPath.split(/[/\\]/).pop()
+      text.textContent = `📄 ${filename}`
+      text.title       = data.logPath
+      pill.style.display = 'block'
+    }
   }
 }
 
@@ -378,10 +402,41 @@ function setStatus(text, type) {
 }
 
 // ─── Nodes ────────────────────────────────────────────────────────────────────
+// Protocol quality ranking — higher = more informative.
+// An ArtPollReply ('artnet') carries name, universes, RDM flags, etc.
+// A passive ArtDmx sniff ('artnet-passive') only has IP + universe numbers.
+// We never replace a higher-quality entry with a lower-quality one.
+const PROTO_RANK = { artnet: 3, sacn: 3, 'artnet-passive': 1 }
+
 function addNode(node) {
-  // Avoid duplicates by ip+protocol
-  if (State.nodes.find(n => n.ip === node.ip && n.protocol === node.protocol)) return
-  State.nodes.push(node)
+  // Manual placeholder entries (protocol: null, manual: true) are deferred
+  // entirely — scanFinished() surfaces them post-scan with real data or a
+  // "not found" tag.  We use the manual flag rather than protocol because
+  // protocol is null on these entries.
+  if (node.manual) return
+
+  const idx = State.nodes.findIndex(n => n.ip === node.ip)
+  if (idx >= 0) {
+    const existing = State.nodes[idx]
+    // Only replace if the incoming entry is strictly better quality.
+    // Example: GrandMA2 responds to ArtPoll (artnet, rank 3), then its
+    // passive ArtDmx packets arrive (artnet-passive, rank 1) — the passive
+    // entry must NOT overwrite the richer ArtPollReply data.
+    const inRank  = PROTO_RANK[node.protocol]     || 0
+    const exRank  = PROTO_RANK[existing.protocol] || 0
+    if (inRank <= exRank) {
+      // Lower-quality data — don't overwrite, but DO clear the stale flag so
+      // the node isn't pruned at scan end (it's clearly alive if it's sending).
+      if (existing.stale) {
+        State.nodes[idx] = { ...existing, stale: false }
+        rerenderNodeList()
+      }
+      return
+    }
+    State.nodes[idx] = { ...node, stale: false }
+  } else {
+    State.nodes.push(node)
+  }
   rerenderNodeList()
 }
 
@@ -397,10 +452,13 @@ function buildNodeLi(node) {
     const uniCount = node.universes ? node.universes.length : 0
     const pktCount = node.packetCount ? ` · ${node.packetCount} pkts` : ''
     rdmTag = `<div class="node-rdm node-passive-tag">${uniCount} uni${pktCount}</div>`
-  } else if (node.protocol === 'artnet-manual') {
+  } else if (node.manual) {
+    // Manual node whose protocol was never confirmed by a scan reply.
     proto = 'Manual'
     protoClass = 'artnet-manual'
-    rdmTag = '<div class="node-manual-tag">manual · RDM</div>'
+    rdmTag = node.notFound
+      ? '<div class="node-manual-tag node-not-found-tag">⚠ not found</div>'
+      : '<div class="node-manual-tag">manual</div>'
   } else {
     proto = 'Art-Net'
     protoClass = 'artnet'
@@ -408,13 +466,13 @@ function buildNodeLi(node) {
   }
 
   const li = document.createElement('li')
-  li.className = 'node-item node-real'
+  li.className = `node-item node-real${node.stale ? ' node-stale' : ''}`
   li.innerHTML = `
     <div class="node-name">${escHtml(node.shortName)}</div>
     <div class="node-ip">${escHtml(node.ip)}</div>
     <div class="node-proto-row">
       <span class="node-proto-badge proto-badge-${protoClass}">${escHtml(proto)}</span>
-      ${rdmTag}
+      ${node.stale ? '<div class="node-rdm node-checking-tag">checking…</div>' : rdmTag}
     </div>
   `
   return li
@@ -604,6 +662,32 @@ function log(msg, type = '') {
 }
 
 // ─── Clear ────────────────────────────────────────────────────────────────────
+
+// Called at the START of a new scan.
+// Keeps existing nodes visible (dimmed) so they don't flash out — the scan
+// will un-stale any it rediscovers.  Nodes not found by scan end are pruned
+// in scanFinished().  Everything else (devices, log, filter) is reset fresh.
+function clearForScan() {
+  // Mark every known node as stale — it will be un-staled when nodeFound fires for it
+  State.nodes.forEach(n => { n.stale = true })
+  rerenderNodeList()
+
+  State.devices  = []
+  State.filtered = []
+  document.getElementById('deviceGrid').innerHTML     = ''
+  document.getElementById('deviceGrid').style.display = 'none'
+  document.getElementById('emptyState').style.display = 'flex'
+  document.getElementById('emptyState').querySelector('.empty-title').textContent = 'No devices discovered yet'
+  document.getElementById('emptyState').querySelector('.empty-sub').innerHTML =
+    'Select a network interface above and click <strong>Scan Network</strong>.<br>No hardware? Hit <strong>Demo</strong> to explore the interface.'
+  document.getElementById('categoryFilter').innerHTML = '<option value="">All</option>'
+  document.getElementById('logBox').innerHTML         = ''
+  document.getElementById('filterInput').value        = ''
+  const pill = document.getElementById('logFilePill')
+  if (pill) pill.style.display = 'none'
+  updateDeviceCount()
+}
+
 function clearAll() {
   State.devices  = []
   State.nodes    = []
@@ -619,6 +703,9 @@ function clearAll() {
   document.getElementById('categoryFilter').innerHTML = '<option value="">All</option>'
   document.getElementById('logBox').innerHTML         = ''
   document.getElementById('filterInput').value        = ''
+  // Hide log file pill when starting a fresh scan
+  const pill = document.getElementById('logFilePill')
+  if (pill) pill.style.display = 'none'
   updateDeviceCount()
 }
 
