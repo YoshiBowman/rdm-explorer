@@ -573,12 +573,35 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
 .devices-header {
   display: flex;
   align-items: center;
+  gap: 12px;
   margin-bottom: 16px;
+  flex-wrap: wrap;
 }
 .device-count {
   font-size: 12px;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+.devices-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
+.devices-toolbar .filter-input {
+  width: auto;
+  flex: 1 1 220px;
+  max-width: 320px;
+  margin-bottom: 0;
+}
+.devices-toolbar .filter-select { flex: 0 0 auto; min-width: 130px; }
+.toolbar-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  flex: 0 0 auto;
 }
 
 /* Empty state */

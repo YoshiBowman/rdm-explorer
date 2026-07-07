@@ -92,30 +92,6 @@
           <ul id="manualNodeList" class="manual-node-list"></ul>
         </section>
 
-        <section class="sidebar-section">
-          <h3 class="sidebar-heading">Filter</h3>
-          <input id="filterInput" class="filter-input" type="text"
-                 placeholder="Search by name, UID, address…" />
-          <div class="filter-row">
-            <label class="filter-label">Category</label>
-            <select id="categoryFilter" class="filter-select">
-              <option value="">All</option>
-            </select>
-          </div>
-          <div class="filter-row">
-            <label class="filter-label">Sort by</label>
-            <select id="sortSelect" class="filter-select">
-              <option value="address">DMX Address</option>
-              <option value="type">Fixture Type</option>
-              <option value="model">Model</option>
-              <option value="manufacturer">Manufacturer</option>
-              <option value="label">Label</option>
-              <option value="node">Node / Universe</option>
-              <option value="uid">UID</option>
-            </select>
-          </div>
-        </section>
-
       </div><!-- /.sidebar-top -->
 
       <!-- Log section — anchored to bottom, always visible -->
@@ -139,6 +115,24 @@
     <main class="main-content">
       <div class="devices-header">
         <span id="deviceCount" class="device-count">0 devices</span>
+        <div class="devices-toolbar">
+          <input id="filterInput" class="filter-input" type="text"
+                 placeholder="Search by name, UID, address…" />
+          <label class="toolbar-label" for="categoryFilter">Category</label>
+          <select id="categoryFilter" class="filter-select">
+            <option value="">All</option>
+          </select>
+          <label class="toolbar-label" for="sortSelect">Sort</label>
+          <select id="sortSelect" class="filter-select">
+            <option value="address">DMX Address</option>
+            <option value="type">Fixture Type</option>
+            <option value="model">Model</option>
+            <option value="manufacturer">Manufacturer</option>
+            <option value="label">Label</option>
+            <option value="node">Node / Universe</option>
+            <option value="uid">UID</option>
+          </select>
+        </div>
       </div>
 
       <div id="emptyState" class="empty-state">
