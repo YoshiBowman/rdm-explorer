@@ -6,3 +6,6 @@ logs/
 nohup.out
 .claude/
 RDMnetBroker.pkg
+
+CLAUDE.md
+docs/SESSION-HISTORY.md
