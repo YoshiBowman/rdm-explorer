@@ -61,14 +61,18 @@ const VECTOR_RPT_NOTIFICATION = 0x00000003
 // RDM inside LLRP vector
 const VECTOR_RDM_CMD_RD_DATA = 0x01
 
-// Broker vectors
-const VECTOR_BROKER_CONNECT             = 0x00000001
-const VECTOR_BROKER_CONNECT_REPLY       = 0x00000002
-const VECTOR_BROKER_CLIENT_ENTRY_RPT    = 0x00000001
-const VECTOR_BROKER_CONNECTED_CLIENT_LIST = 0x00000006
-const VECTOR_BROKER_CLIENT_ADD          = 0x00000007
-const VECTOR_BROKER_CLIENT_REMOVE       = 0x00000008
-const VECTOR_BROKER_CLIENT_ENTRY_CHANGE = 0x00000009
+// Broker vectors (E1.33 Table A-8 — corrected to spec values in Session 45;
+// must stay in lockstep with rdmnet-broker.js)
+const VECTOR_BROKER_CONNECT             = 0x0001
+const VECTOR_BROKER_CONNECT_REPLY       = 0x0002
+const VECTOR_BROKER_FETCH_CLIENT_LIST   = 0x0006
+const VECTOR_BROKER_CONNECTED_CLIENT_LIST = 0x0007
+const VECTOR_BROKER_CLIENT_ADD          = 0x0008
+const VECTOR_BROKER_CLIENT_REMOVE       = 0x0009
+const VECTOR_BROKER_CLIENT_ENTRY_CHANGE = 0x000A
+
+// Client Entry PDU vector = client protocol code (E1.33 §6.2.3)
+const VECTOR_BROKER_CLIENT_ENTRY_RPT    = 0x00000005
 
 // RPT request/notification sub-vectors
 const VECTOR_REQUEST_RDM_CMD            = 0x00000001
@@ -507,7 +511,7 @@ function _parseBrokerClientEntries(data) {
         cid:        entryData.slice(0, 16).toString('hex'),
         uid:        entryData.slice(16, 22).toString('hex').toUpperCase(),
         uidStr:     `${entryData.slice(16, 18).toString('hex').toUpperCase()}:${entryData.slice(18, 22).toString('hex').toUpperCase()}`,
-        clientType: entryData[22],  // 1=Controller, 2=Device
+        clientType: entryData[22],  // 0=Device (E1.33 Table 6-15), 1=Controller
         bindingCID: entryData.slice(23, 39).toString('hex'),
       })
     }
@@ -1273,7 +1277,7 @@ class RDMnet extends EventEmitter {
    */
   getBrokerClients(ip) {
     const entry = this.tcpSockets.get(ip)
-    return entry ? (entry.clients || []).filter(c => c.clientType === 2) : []  // type 2 = Device
+    return entry ? (entry.clients || []).filter(c => c.clientType === 0) : []  // type 0 = RPT Device (E1.33)
   }
 
   /**

@@ -222,31 +222,48 @@ ipcMain.handle('stop-scan', () => {
 
 // ─── Device Control ───────────────────────────────────────────────────────────
 
-ipcMain.handle('set-dmx-address', async (_event, device, address) => {
+// Shared wrapper: run a device SET and translate the RDM response into
+// { ok, error } — a NACK (write-protect, out-of-range, …) is a REAL failure
+// with the fixture's stated reason, not a silent fake success.
+async function handleDeviceSet(fn) {
   if (!scanner) return { ok: false, error: 'No active scanner' }
   try {
-    await scanner.setDmxAddress(device, address)
-    return { ok: true }
+    const resp = await fn()
+    return Scanner.setResult(resp)
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+}
+
+ipcMain.handle('set-dmx-address', (_event, device, address) =>
+  handleDeviceSet(() => scanner.setDmxAddress(device, address)))
+
+ipcMain.handle('set-device-label', (_event, device, label) =>
+  handleDeviceSet(() => scanner.setDeviceLabel(device, label)))
+
+ipcMain.handle('identify-device', (_event, device, on) =>
+  handleDeviceSet(() => scanner.identifyDevice(device, on)))
+
+ipcMain.handle('set-device-personality', (_event, device, personality) =>
+  handleDeviceSet(() => scanner.setDevicePersonality(device, personality)))
+
+// One-time detail fetch when the fixture panel opens (personalities + sensor defs)
+ipcMain.handle('get-device-detail', async (_event, device) => {
+  if (!scanner) return { ok: false, error: 'No active scanner' }
+  try {
+    const detail = await scanner.getDeviceDetail(device)
+    return { ok: true, detail: sanitize(detail) }
   } catch (e) {
     return { ok: false, error: e.message }
   }
 })
 
-ipcMain.handle('set-device-label', async (_event, device, label) => {
+// Repeated poll while the fixture panel is open (sensor values, vitals, status)
+ipcMain.handle('poll-device-vitals', async (_event, device, sensorNums) => {
   if (!scanner) return { ok: false, error: 'No active scanner' }
   try {
-    await scanner.setDeviceLabel(device, label)
-    return { ok: true }
-  } catch (e) {
-    return { ok: false, error: e.message }
-  }
-})
-
-ipcMain.handle('identify-device', async (_event, device, on) => {
-  if (!scanner) return { ok: false, error: 'No active scanner' }
-  try {
-    await scanner.identifyDevice(device, on)
-    return { ok: true }
+    const vitals = await scanner.pollDeviceVitals(device, sensorNums || [])
+    return { ok: true, vitals: sanitize(vitals) }
   } catch (e) {
     return { ok: false, error: e.message }
   }

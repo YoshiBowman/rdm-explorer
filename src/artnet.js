@@ -164,7 +164,17 @@ class ArtNet extends EventEmitter {
 
   _send(buf, address, port) {
     if (!this.socket) return
-    this.socket.send(buf, 0, buf.length, port, address)
+    this.socket.send(buf, 0, buf.length, port, address, (err) => {
+      // macOS 15+ Local Network privacy: when the app is denied the
+      // "Local Network" permission, every send to a local-subnet, broadcast or
+      // multicast address fails with EHOSTUNREACH.  Without surfacing this the
+      // scan just silently finds nothing.  Emit once so the scanner can print
+      // an actionable diagnostic.
+      if (err && (err.code === 'EHOSTUNREACH' || err.code === 'EACCES') && !this._sendBlockedWarned) {
+        this._sendBlockedWarned = true
+        this.emit('sendBlocked', { address, port, code: err.code })
+      }
+    })
   }
 
   _handleMessage(msg, rinfo) {

@@ -47,6 +47,12 @@ class Scanner extends EventEmitter {
     this._pendingCallback = null
     this._todCollector    = null   // active TOD collection callback (set during requestTOD)
     this.running = false
+    // Default broadcast targets — overridden by start() when network interfaces
+    // are known.  Initialised here so fullScan() is safe to call without a
+    // prior start() call (avoids "Cannot read properties of undefined (reading
+    // 'join')" when fullScan logs the broadcast list on line 999).
+    this.broadcasts     = ['255.255.255.255']
+    this.subnetOverride = ''
 
     // ── Embedded RDMnet Broker ─────────────────────────────────────────────
     // Re-use the module-level singleton so the TCP server never restarts
@@ -117,6 +123,25 @@ class Scanner extends EventEmitter {
       })
 
       this.artnet.on('error', (err) => this.emit('error', err))
+
+      // macOS Local Network privacy denial — outbound UDP to the local subnet is
+      // blocked for this app.  Without permission NOTHING (Art-Net, sACN, mDNS,
+      // LLRP) can be discovered, so tell the user exactly how to fix it.
+      this.artnet.on('sendBlocked', ({ address, code }) => {
+        const box = [
+          `╔══════════════════════════════════════════════════════════════════╗`,
+          `║  ⚠ NETWORK SENDS ARE BLOCKED BY macOS (${code} → ${address})`,
+          `║  This app has been DENIED the "Local Network" permission, so it   ║`,
+          `║  cannot send Art-Net polls, mDNS, sACN or LLRP packets at all.    ║`,
+          `║  Fix: System Settings → Privacy & Security → Local Network →      ║`,
+          `║       enable this app (Electron / RDM Explorer), then rescan.     ║`,
+          `╚══════════════════════════════════════════════════════════════════╝`,
+        ]
+        for (const line of box) {
+          this.emit('progress', { message: line })
+          console.log(`[Scanner] ${line}`)
+        }
+      })
     }
 
     if (startSACN) {
@@ -377,13 +402,21 @@ class Scanner extends EventEmitter {
     if (!this.broker || !this.broker.running) return null
     // If a specific gateway CID is provided, use it.  Otherwise fall back to the
     // first connected gateway (for legacy "Try 3" RPT paths).
+    const gateways = this.broker.getConnectedGateways()
     let cidBuf = gatewayCIDBuf
     if (!cidBuf) {
-      const gateways = this.broker.getConnectedGateways()
       if (gateways.length === 0) return null
       cidBuf = gateways[0].cidBuf
     }
-    return this.broker.sendRdm(cidBuf, destUID, destEndpoint, packet, timeout)
+    // The RPT routing header must carry a valid RPT component UID — the GATEWAY's
+    // UID, never a fixture UID or nothing (legacy call sites pass no destUID,
+    // which used to crash buildRPTRequest with "reading 'copy'").
+    if (!destUID || !Buffer.isBuffer(destUID)) {
+      const gw = gateways.find(g => g.cidBuf.equals(cidBuf))
+      destUID = gw ? gw.uidBuf : null
+      if (!destUID) return null
+    }
+    return this.broker.sendRdm(cidBuf, destUID, destEndpoint || 0, packet, timeout)
   }
 
   // ─── Multi-Transport RDM Send ───────────────────────────────────────────────
@@ -574,6 +607,184 @@ class Scanner extends EventEmitter {
     }
   }
 
+  // ─── E1.37-7 Gateway Endpoint Discovery ───────────────────────────────────────
+  //
+  // RDMnet gateways (Pathports etc.) run their own background RDM discovery on
+  // each physical port.  Per E1.33/E1.37-7 the controller does NOT push binary-tree
+  // DISC_UNIQUE_BRANCH through RPT (RPT cannot transport DUB responses); instead it
+  // asks the gateway's default responder (endpoint 0):
+  //   GET ENDPOINT_LIST       (0x0900) → [ { endpointId, type } ]
+  //   GET ENDPOINT_RESPONDERS (0x090B) → UIDs the gateway found on that endpoint
+
+  /**
+   * GET ENDPOINT_LIST from a gateway's default responder.
+   * @param {object} gw  - entry from broker.getConnectedGateways() (needs uidBuf, cidBuf)
+   * @returns {Promise<Array<{id:number,type:number}>|null>}  null = unsupported/no reply
+   */
+  async getGatewayEndpoints(gw) {
+    if (!gw.uidBuf) return null
+    const ctx = { destUID: gw.uidBuf, endpoint: 0, gatewayCIDBuf: gw.cidBuf, nodeIP: gw.ip }
+    const req = RDM.buildGetRequest(gw.uidBuf, RDM.PID.ENDPOINT_LIST)
+    const raw = await this._sendRDM('rpt', ctx, req, 1500)
+    if (!raw) return null
+    const pkt = RDM.parsePacket(raw)
+    if (pkt && pkt.responseType === RDM.RESPONSE_TYPE.NACK_REASON && pkt.pd && pkt.pd.length >= 2) {
+      console.log(`[Scanner] ENDPOINT_LIST NACKed by ${gw.ip}: ${RDM.nackReasonString(pkt.pd)}`)
+    }
+    if (!pkt || pkt.responseType !== RDM.RESPONSE_TYPE.ACK || !pkt.pd || pkt.pd.length < 4) return null
+    // PD: list change number (4) + N × [ endpoint ID (2) + endpoint type (1) ]
+    const endpoints = []
+    for (let off = 4; off + 3 <= pkt.pd.length; off += 3) {
+      endpoints.push({ id: pkt.pd.readUInt16BE(off), type: pkt.pd[off + 2] })
+    }
+    return endpoints
+  }
+
+  /**
+   * GET ENDPOINT_RESPONDERS for one endpoint of a gateway.
+   * @returns {Promise<Array<{uidStr,uidBuf}>|null>}  null = unsupported/no reply
+   */
+  async getEndpointResponders(gw, endpointId) {
+    if (!gw.uidBuf) return null
+    const ctx = { destUID: gw.uidBuf, endpoint: 0, gatewayCIDBuf: gw.cidBuf, nodeIP: gw.ip }
+    const pd  = Buffer.alloc(2)
+    pd.writeUInt16BE(endpointId, 0)
+    const req = RDM.buildGetRequest(gw.uidBuf, RDM.PID.ENDPOINT_RESPONDERS, pd)
+    const raw = await this._sendRDM('rpt', ctx, req, 1500)
+    if (!raw) return null
+    const pkt = RDM.parsePacket(raw)
+    if (!pkt || pkt.responseType !== RDM.RESPONSE_TYPE.ACK || !pkt.pd || pkt.pd.length < 6) return null
+    // PD: endpoint ID (2) + list change number (4) + N × UID (6)
+    const uids = []
+    for (let off = 6; off + 6 <= pkt.pd.length; off += 6) {
+      const uidBuf = Buffer.from(pkt.pd.slice(off, off + 6))
+      uids.push({ uidStr: RDM.uidToString(uidBuf), uidBuf })
+    }
+    return uids
+  }
+
+  /**
+   * Scan one connected RPT gateway for RDM devices.
+   * Tries E1.37-7 endpoint enumeration first (the standard mechanism); falls back
+   * to the legacy binary-tree sweep over endpoints 1–8 if the gateway does not
+   * answer ENDPOINT_LIST.
+   *
+   * @returns {Promise<Array>}  device info objects (already emitted as deviceFound)
+   */
+  async _scanRPTGateway(gw, gwNode, report, alive, transportLabel) {
+    const devices = []
+
+    const readDevices = async (ep, uids) => {
+      for (const { uidStr, uidBuf } of uids) {
+        if (!alive()) return
+        report(`    Reading: ${uidStr}`)
+        try {
+          // RPT routing (ctx.destUID) targets the GATEWAY's UID — physical fixtures
+          // behind a gateway are not RPT components (E1.33 / ETC RdmnetDestinationAddr:
+          // rdmnet_uid = gateway, endpoint = port, rdm_uid = fixture).  The fixture UID
+          // goes only in the inner RDM message (uidBuf → getDeviceInfoVia).
+          // Addressing the fixture UID at the RPT layer gets RPT_STATUS UNKNOWN_RPT_UID.
+          const ctx = { destUID: gw.uidBuf, endpoint: ep, gatewayCIDBuf: gw.cidBuf, nodeIP: gw.ip }
+          const deviceInfo = await this.getDeviceInfoVia('rpt', ctx, uidStr, uidBuf)
+          deviceInfo.universe  = `EP${ep}`
+          deviceInfo.nodeName  = gwNode.shortName
+          deviceInfo.nodeIP    = gw.ip
+          deviceInfo.protocol  = 'rdmnet-rpt'
+          deviceInfo.transport = transportLabel
+          // RPT routing info so the device stays controllable after the scan
+          // (hex strings — Buffers don't survive the IPC sanitize boundary).
+          deviceInfo.endpoint   = ep
+          deviceInfo.gatewayCID = gw.cidHex
+          deviceInfo.gatewayUID = gw.uidBuf ? gw.uidBuf.toString('hex') : null
+          devices.push(deviceInfo)
+          this.emit('deviceFound', deviceInfo)
+        } catch (e) {
+          report(`    Error reading ${uidStr}: ${e.message}`)
+        }
+      }
+    }
+
+    // Post-pass: re-read identity for devices whose labels timed out mid-scan.
+    // Direct reads after the endpoint sweep reliably succeed (~30 ms), so one
+    // quiet second pass recovers nearly every "unknown" fixture.
+    const backfillLabels = async () => {
+      const missing = devices.filter(d => !d.deviceModelDescription || !d.manufacturerLabel)
+      if (missing.length === 0) return
+      report(`  [RPT] Re-reading identity for ${missing.length} device(s) that timed out…`)
+      for (const dev of missing) {
+        if (!alive()) return
+        try {
+          const uidBuf = RDM.stringToUID(dev.uid)
+          const ctx = { destUID: gw.uidBuf, endpoint: dev.endpoint, gatewayCIDBuf: gw.cidBuf, nodeIP: gw.ip }
+          const fresh = await this.getDeviceInfoVia('rpt', ctx, dev.uid, uidBuf)
+          let updated = false
+          for (const [k, v] of Object.entries(fresh)) {
+            if (v !== null && v !== undefined && (dev[k] === null || dev[k] === undefined)) {
+              dev[k] = v
+              updated = true
+            }
+          }
+          if (updated) this.emit('deviceFound', dev)   // renderer merges by UID
+        } catch (_) {}
+      }
+    }
+
+    // ── Preferred: E1.37-7 endpoint enumeration ────────────────────────────────
+    const endpoints = await this.getGatewayEndpoints(gw)
+    if (endpoints !== null) {
+      report(`  [RPT] Gateway reports ${endpoints.length} endpoint(s) via ENDPOINT_LIST (E1.37-7)`)
+      for (const { id: ep } of endpoints) {
+        if (!alive()) break
+        const uids = await this.getEndpointResponders(gw, ep)
+        if (!uids || uids.length === 0) continue
+        report(`  ✓ Endpoint ${ep}: gateway reports ${uids.length} RDM responder(s)`)
+        for (const u of uids) this.emit('uidFound', { uidStr: u.uidStr, nodeIP: gw.ip })
+        await readDevices(ep, uids)
+      }
+      if (devices.length > 0 || endpoints.length > 0) { await backfillLabels(); return devices }
+      // ENDPOINT_LIST answered but empty — fall through to legacy sweep as last resort
+    } else {
+      report(`  [RPT] Gateway did not answer ENDPOINT_LIST (E1.37-7 unsupported by this firmware)`)
+    }
+
+    // ── Passive: responders observed in the gateway's own notification stream ──
+    // Pathports background-poll their fixtures and broadcast the RDM responses to
+    // all connected controllers.  Within seconds of the TCP connection the broker
+    // has seen every live fixture's UID + endpoint — no active discovery needed.
+    const observed = this.broker ? this.broker.getObservedResponders(gw.cidBuf) : []
+    if (observed.length > 0) {
+      report(`  ✓ ${observed.length} RDM responder(s) observed in gateway's notification stream`)
+      const byEndpoint = new Map()
+      for (const o of observed) {
+        if (!byEndpoint.has(o.endpoint)) byEndpoint.set(o.endpoint, [])
+        byEndpoint.get(o.endpoint).push({ uidStr: RDM.uidToString(o.uidBuf), uidBuf: o.uidBuf })
+      }
+      for (const [ep, uids] of byEndpoint) {
+        if (!alive()) break
+        report(`  ✓ Endpoint ${ep}: ${uids.length} responder(s) — ${uids.map(u => u.uidStr).join(', ')}`)
+        for (const u of uids) this.emit('uidFound', { uidStr: u.uidStr, nodeIP: gw.ip })
+        await readDevices(ep, uids)
+      }
+      if (devices.length > 0) { await backfillLabels(); return devices }
+    }
+
+    // ── Fallback: legacy binary-tree discovery on endpoints 1–8 ────────────────
+    // RPT routing targets the gateway UID; the DISC packets carry the RDM broadcast
+    // UID internally.  (Broadcast at the RPT layer gets RPT_STATUS UNKNOWN_RPT_UID.)
+    for (let ep = 1; ep <= 8; ep++) {
+      if (!alive()) break
+      const ctx = { destUID: gw.uidBuf, endpoint: ep, gatewayCIDBuf: gw.cidBuf, nodeIP: gw.ip }
+      report(`  [RPT] Discovering on endpoint ${ep}…`)
+      let uids = []
+      try { uids = await this.discoverRDMDevicesVia('rpt', ctx) } catch (_) { continue }
+      if (uids.length === 0) continue
+      report(`  ✓ Found ${uids.length} RDM UID(s) on endpoint ${ep}`)
+      await readDevices(ep, uids)
+    }
+    await backfillLabels()
+    return devices
+  }
+
   /**
    * Get device info using a specific transport.
    * Same as getDeviceInfo but transport-agnostic.
@@ -583,7 +794,13 @@ class Scanner extends EventEmitter {
 
     const _get = async (pid, pd) => {
       const request = RDM.buildGetRequest(uidBuf, pid, pd)
-      const raw = await this._sendRDM(transport, ctx, request, RDM_TIMEOUT_MS)
+      let raw = await this._sendRDM(transport, ctx, request, RDM_TIMEOUT_MS)
+      if (!raw) {
+        // One retry on timeout only.  Over RPT the reply can race the gateway's
+        // background-poll notification stream; a single retry recovers nearly all
+        // "unknown"-label fixtures.  NACKs return a packet and are NOT retried.
+        raw = await this._sendRDM(transport, ctx, request, RDM_TIMEOUT_MS)
+      }
       if (!raw) return null
       return RDM.parsePacket(raw)
     }
@@ -669,24 +886,159 @@ class Scanner extends EventEmitter {
 
   // ─── Convenience Actions ──────────────────────────────────────────────────────
 
+  // ─── Transport-aware device I/O ───────────────────────────────────────────────
+  //
+  // Devices discovered via RDMnet RPT carry { endpoint, gatewayCID, gatewayUID }
+  // (hex strings — set in _scanRPTGateway).  Devices discovered via Art-Net carry
+  // { nodeIP, net, sub, uni }.  _deviceCtx() rebuilds the right transport context
+  // from those serialized fields so GET/SET work on any device after any scan.
+
+  _deviceCtx(device) {
+    if (device.protocol === 'rdmnet-rpt' && device.gatewayCID && device.gatewayUID) {
+      return {
+        transport: 'rpt',
+        ctx: {
+          destUID:       Buffer.from(device.gatewayUID, 'hex'),  // RPT routes to the GATEWAY
+          endpoint:      device.endpoint || 0,
+          gatewayCIDBuf: Buffer.from(device.gatewayCID, 'hex'),
+          nodeIP:        device.nodeIP,
+        },
+      }
+    }
+    return {
+      transport: 'artnet',
+      ctx: { nodeIP: device.nodeIP, net: device.net || 0, sub: device.sub || 0, uni: device.uni || 0 },
+    }
+  }
+
+  async _deviceGet(device, pid, pd = null, timeout = RDM_TIMEOUT_MS) {
+    const { transport, ctx } = this._deviceCtx(device)
+    const uidBuf  = typeof device.uid === 'string' ? RDM.stringToUID(device.uid) : device.uid
+    const request = RDM.buildGetRequest(uidBuf, pid, pd)
+    const raw     = await this._sendRDM(transport, ctx, request, timeout)
+    if (!raw) return null
+    return RDM.parsePacket(raw)
+  }
+
+  async _deviceSet(device, pid, pd, timeout = RDM_SET_TIMEOUT_MS) {
+    const { transport, ctx } = this._deviceCtx(device)
+    const uidBuf  = typeof device.uid === 'string' ? RDM.stringToUID(device.uid) : device.uid
+    const request = RDM.buildSetRequest(uidBuf, pid, pd)
+    const raw     = await this._sendRDM(transport, ctx, request, timeout)
+    if (!raw) return null
+    return RDM.parsePacket(raw)
+  }
+
+  /**
+   * Interpret a SET response into { ok, error } for the UI.
+   * ACK / ACK_TIMER = success; NACK carries the fixture's actual refusal reason
+   * (write-protected, out of range, …) instead of a fake "success".
+   */
+  static setResult(resp) {
+    if (!resp) return { ok: false, error: 'No response from device (timeout)' }
+    if (resp.responseType === RDM.RESPONSE_TYPE.ACK) return { ok: true }
+    if (resp.responseType === RDM.RESPONSE_TYPE.ACK_TIMER) return { ok: true, pending: true }
+    if (resp.responseType === RDM.RESPONSE_TYPE.NACK_REASON) {
+      return { ok: false, error: `Device refused: ${RDM.nackReasonString(resp.pd)}` }
+    }
+    return { ok: false, error: `Unexpected response type 0x${(resp.responseType ?? 0).toString(16)}` }
+  }
+
   async setDmxAddress(device, newAddress) {
-    const { nodeIP, net, sub, uni, uid } = device
     const pd = Buffer.alloc(2)
     pd.writeUInt16BE(newAddress, 0)
-    return this.setRDMParam(nodeIP, net, sub, uni, uid, RDM.PID.DMX_START_ADDRESS, pd)
+    return this._deviceSet(device, RDM.PID.DMX_START_ADDRESS, pd)
   }
 
   async setDeviceLabel(device, label) {
-    const { nodeIP, net, sub, uni, uid } = device
     const pd = Buffer.from(label.slice(0, 32), 'ascii')
-    return this.setRDMParam(nodeIP, net, sub, uni, uid, RDM.PID.DEVICE_LABEL, pd)
+    return this._deviceSet(device, RDM.PID.DEVICE_LABEL, pd)
   }
 
   async identifyDevice(device, on) {
-    const { nodeIP, net, sub, uni, uid } = device
     const pd = Buffer.alloc(1)
     pd[0] = on ? 0x01 : 0x00
-    return this.setRDMParam(nodeIP, net, sub, uni, uid, RDM.PID.IDENTIFY_DEVICE, pd)
+    return this._deviceSet(device, RDM.PID.IDENTIFY_DEVICE, pd)
+  }
+
+  async setDevicePersonality(device, personality) {
+    const pd = Buffer.alloc(1)
+    pd[0] = personality & 0xFF
+    return this._deviceSet(device, RDM.PID.DMX_PERSONALITY, pd)
+  }
+
+  /**
+   * One-time detail fetch when the fixture panel opens: personality list and
+   * sensor definitions.  Both are static per fixture, so the renderer caches them.
+   */
+  async getDeviceDetail(device) {
+    const detail = { personalities: [], sensors: [] }
+
+    const pCount = Math.min(device.personalityCount || 0, 32)
+    for (let p = 1; p <= pCount; p++) {
+      const pd = Buffer.from([p])
+      const resp = await this._deviceGet(device, RDM.PID.DMX_PERSONALITY_DESCRIPTION, pd)
+      if (resp?.responseType === RDM.RESPONSE_TYPE.ACK && resp.pd && resp.pd.length >= 3) {
+        detail.personalities.push({
+          n:         resp.pd[0],
+          footprint: resp.pd.readUInt16BE(1),
+          name:      resp.pd.slice(3).toString('ascii').replace(/\0.*$/, '').trim(),
+        })
+      }
+    }
+
+    const sCount = Math.min(device.sensorCount || 0, 24)
+    for (let s = 0; s < sCount; s++) {
+      const resp = await this._deviceGet(device, RDM.PID.SENSOR_DEFINITION, Buffer.from([s]))
+      if (resp?.responseType === RDM.RESPONSE_TYPE.ACK && resp.pd) {
+        const def = RDM.parseSensorDefinition(resp.pd)
+        if (def) detail.sensors.push(def)
+      }
+    }
+
+    return detail
+  }
+
+  /**
+   * Poll pass for the fixture panel: sensor values, vitals and status messages.
+   * Every field is best-effort — devices NACK what they don't support.
+   */
+  async pollDeviceVitals(device, sensorNums = []) {
+    const out = { sensors: [], vitals: {}, statusMessages: [] }
+
+    for (const s of sensorNums.slice(0, 24)) {
+      const resp = await this._deviceGet(device, RDM.PID.SENSOR_VALUE, Buffer.from([s]))
+      if (resp?.responseType === RDM.RESPONSE_TYPE.ACK && resp.pd) {
+        const v = RDM.parseSensorValue(resp.pd)
+        if (v) out.sensors.push(v)
+      }
+    }
+
+    const u32 = (resp) => (resp?.responseType === RDM.RESPONSE_TYPE.ACK && resp.pd?.length >= 4)
+      ? resp.pd.readUInt32BE(0) : null
+
+    out.vitals.deviceHours = u32(await this._deviceGet(device, RDM.PID.DEVICE_HOURS))
+    out.vitals.lampHours   = u32(await this._deviceGet(device, RDM.PID.LAMP_HOURS))
+    out.vitals.lampStrikes = u32(await this._deviceGet(device, RDM.PID.LAMP_STRIKES))
+    out.vitals.powerCycles = u32(await this._deviceGet(device, RDM.PID.DEVICE_POWER_CYCLES))
+
+    const lampState = await this._deviceGet(device, RDM.PID.LAMP_STATE)
+    if (lampState?.responseType === RDM.RESPONSE_TYPE.ACK && lampState.pd?.length >= 1) {
+      out.vitals.lampState = RDM.LAMP_STATE_NAME[lampState.pd[0]] || `0x${lampState.pd[0].toString(16)}`
+    }
+
+    const addr = await this._deviceGet(device, RDM.PID.DMX_START_ADDRESS)
+    if (addr?.responseType === RDM.RESPONSE_TYPE.ACK && addr.pd?.length >= 2) {
+      out.vitals.dmxStartAddress = addr.pd.readUInt16BE(0)
+    }
+
+    // Status messages: 0x02 = "Advisory" collects advisory + warning + error
+    const st = await this._deviceGet(device, RDM.PID.STATUS_MESSAGES, Buffer.from([0x02]))
+    if (st?.responseType === RDM.RESPONSE_TYPE.ACK && st.pd) {
+      out.statusMessages = RDM.parseStatusMessages(st.pd)
+    }
+
+    return out
   }
 
   // ─── Full Scan Workflow ───────────────────────────────────────────────────────
@@ -697,6 +1049,36 @@ class Scanner extends EventEmitter {
    * @param {string} protocol - 'artnet', 'sacn', or 'both'
    */
   async fullScan(bindAddress, onProgress, protocol = 'both') {
+    // In the normal app flow (main.js) start() is called before fullScan().
+    // When fullScan() is called directly (e.g. integration tests) we call start()
+    // here with computed per-NIC broadcast addresses so Art-Net discovery works.
+    if (!this.artnet.socket) {
+      let broadcasts = ['255.255.255.255']
+      const addr = bindAddress || '0.0.0.0'
+      if (addr === '0.0.0.0') {
+        const ifaces = os.networkInterfaces()
+        for (const addrs of Object.values(ifaces)) {
+          for (const a of addrs) {
+            if (a.family === 'IPv4' && !a.internal) {
+              const ip   = a.address.split('.').map(Number)
+              const mask = a.netmask.split('.').map(Number)
+              const bc   = ip.map((o, i) => (o | (~mask[i] & 0xFF))).join('.')
+              if (!broadcasts.includes(bc)) broadcasts.push(bc)
+              if (ip[0] === 10 && !broadcasts.includes('10.255.255.255'))
+                broadcasts.push('10.255.255.255')
+              if (ip[0] === 172 && ip[1] >= 16 && ip[1] <= 31
+                  && !broadcasts.includes('172.31.255.255'))
+                broadcasts.push('172.31.255.255')
+              if (ip[0] === 192 && ip[1] === 168
+                  && !broadcasts.includes('192.168.255.255'))
+                broadcasts.push('192.168.255.255')
+            }
+          }
+        }
+      }
+      try { await this.start(addr, protocol, broadcasts) } catch (_) {}
+    }
+
     this.running = true
     const scanArtNet = protocol === 'artnet' || protocol === 'both'
     const scanSACN   = protocol === 'sacn'   || protocol === 'both'
@@ -811,7 +1193,7 @@ class Scanner extends EventEmitter {
               brokerIP = svc.ip
               report(`[RDMnet] ✓ Connected to broker at ${svc.ip} as RPT Controller`)
               if (conn.clients.length > 0) {
-                const devices = conn.clients.filter(c => c.clientType === 2)
+                const devices = conn.clients.filter(c => c.clientType === 0)  // 0 = RPT Device (E1.33)
                 report(`[RDMnet]   Broker reports ${devices.length} RPT Device(s):`)
                 for (const c of devices) {
                   report(`[RDMnet]     ${c.uidStr} (CID: ${c.cid.slice(0,8)}…)`)
@@ -849,7 +1231,7 @@ class Scanner extends EventEmitter {
               brokerIP = ip
               report(`[RDMnet] ✓ Found broker at ${ip}:${RDMNET_PORT} via TCP probe`)
               if (conn.clients.length > 0) {
-                const devices = conn.clients.filter(c => c.clientType === 2)
+                const devices = conn.clients.filter(c => c.clientType === 0)  // 0 = RPT Device (E1.33)
                 report(`[RDMnet]   Broker reports ${devices.length} RPT Device(s):`)
                 for (const c of devices) {
                   report(`[RDMnet]     ${c.uidStr} (CID: ${c.cid.slice(0,8)}…)`)
@@ -894,50 +1276,11 @@ class Scanner extends EventEmitter {
             this.emit('nodeFound', gwNode)
           }
 
-          const broadcastUID   = Buffer.from([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
-          let   gwFoundDevices = false
+          // E1.37-7 endpoint enumeration with legacy binary-tree fallback
+          const gwDevices = await this._scanRPTGateway(gw, gwNode, report, alive, 'RDMnet RPT (embedded broker)')
+          allDevices.push(...gwDevices)
 
-          // Pathport 8-port → try endpoints 1–8 (one per physical DMX port)
-          for (let ep = 1; ep <= 8; ep++) {
-            if (!alive()) break
-
-            const ctx = {
-              destUID:       broadcastUID,
-              endpoint:      ep,
-              gatewayCIDBuf: gw.cidBuf,
-              nodeIP:        gw.ip,
-            }
-
-            report(`  [RPT] Discovering on endpoint ${ep}…`)
-            let uids = []
-            try {
-              uids = await this.discoverRDMDevicesVia('rpt', ctx)
-            } catch (_) { continue }
-
-            if (uids.length === 0) continue
-
-            gwFoundDevices = true
-            report(`  ✓ Found ${uids.length} RDM UID(s) on endpoint ${ep}`)
-
-            for (const { uidStr, uidBuf } of uids) {
-              if (!alive()) break
-              report(`    Reading: ${uidStr}`)
-              try {
-                const deviceInfo = await this.getDeviceInfoVia('rpt', ctx, uidStr, uidBuf)
-                deviceInfo.universe  = `EP${ep}`
-                deviceInfo.nodeName  = gwNode.shortName
-                deviceInfo.nodeIP    = gw.ip
-                deviceInfo.protocol  = 'rdmnet-rpt'
-                deviceInfo.transport = 'RDMnet RPT (embedded broker)'
-                allDevices.push(deviceInfo)
-                this.emit('deviceFound', deviceInfo)
-              } catch (e) {
-                report(`    Error reading ${uidStr}: ${e.message}`)
-              }
-            }
-          }
-
-          if (!gwFoundDevices) {
+          if (gwDevices.length === 0) {
             report(`  [RPT] No RDM devices found on gateway ${gw.ip}.`)
             report(`         Verify that RDM fixtures are connected to the Pathport's physical ports`)
             report(`         and that RDM is enabled on those ports in Pathscape.`)
@@ -955,8 +1298,6 @@ class Scanner extends EventEmitter {
           report(`  If Pathports are configured for E1.33 RDMnet (Unsecured) but still not connecting:`)
           report(`  • macOS firewall may be blocking port 5569 — check System Settings → Privacy &`)
           report(`    Security → Firewall → ensure RDM Explorer (or Electron) is set to Allow`)
-          report(`  • Try re-applying Pathport settings: in Pathscape select each Pathport → Send All`)
-          report(`    (this re-triggers the Pathport's mDNS broker lookup)`)
         } else {
           report(`Embedded RDMnet broker running (port 5569) — mDNS not yet started, wait and re-scan.`)
         }
@@ -1362,17 +1703,9 @@ class Scanner extends EventEmitter {
                 } else {
                   report(`  ║  ✗ This Pathport has NOT connected to the broker yet.        ║`)
                   report(`  ║                                                                ║`)
-                  report(`  ║  TO SET UP:                                                   ║`)
-                  report(`  ║   1. In Pathscape: Properties → Network RDM Protocol         ║`)
-                  report(`  ║      → select "E1.33 RDMnet (Unsecured)"                     ║`)
-                  report(`  ║   2. Click "Send All" to apply                                ║`)
-                  report(`  ║   3. Leave RDM Explorer running for ~30 s — the Pathport     ║`)
-                  report(`  ║      will discover this app via mDNS and connect              ║`)
-                  report(`  ║   4. Run a new scan — the Pathport should now appear as       ║`)
-                  report(`  ║      a connected gateway with RDM devices found               ║`)
-                  report(`  ║                                                                ║`)
-                  report(`  ║  NOTE: Pathscape itself has no RDMnet broker — opening it     ║`)
-                  report(`  ║  does not help. RDM Explorer IS the broker.                  ║`)
+                  report(`  ║  The Pathport should discover this app via mDNS and connect  ║`)
+                  report(`  ║  automatically.  Leave RDM Explorer running for ~30 s and    ║`)
+                  report(`  ║  run a new scan.                                              ║`)
                 }
                 report(`  ╚════════════════════════════════════════════════════════════════╝`)
               } else if (isMAgrandMA) {
@@ -1392,8 +1725,8 @@ class Scanner extends EventEmitter {
                 report(`  ╚════════════════════════════════════════════════════════════════╝`)
               } else if (!brokerIP && mdnsRDMnetServices.length === 0) {
                 report(`  [diag] No RDMnet broker found on the network.`)
-                report(`         If this device supports E1.33 RDMnet, open its RDMnet broker`)
-                report(`         application (e.g. Pathscape for Pathway nodes) and re-scan.`)
+                report(`         If this device supports E1.33 RDMnet, ensure an RDMnet broker`)
+                report(`         is running on the network and re-scan.`)
               }
 
               // Check if this IP was seen as an sACN source — confirms it's alive
@@ -1592,13 +1925,9 @@ class Scanner extends EventEmitter {
                 report(`  ║  This Pathport is transmitting sACN but did not respond to      ║`)
                 report(`  ║  LLRP or RDMnet probes.                                        ║`)
                 report(`  ║                                                                ║`)
-                report(`  ║  For RDM access, configure in Pathscape:                        ║`)
-                report(`  ║   1. Network RDM Protocol → "E1.33 RDMnet (Unsecured)"         ║`)
-                report(`  ║      (default "Pathway RDM" is proprietary — won't work here)  ║`)
-                report(`  ║   2. OR: Open Pathscape with its RDMnet broker enabled          ║`)
-                report(`  ║      so this app can discover via broker connection              ║`)
-                report(`  ║                                                                ║`)
-                report(`  ║  Art-Net RX can also be enabled separately for Art-Net RDM.     ║`)
+                report(`  ║  Pathport firmware supports RDM via E1.33 RDMnet only.         ║`)
+                report(`  ║  RDM Explorer has a built-in RDMnet broker — leave it running  ║`)
+                report(`  ║  and the Pathport should connect automatically via mDNS.       ║`)
                 report(`  ╚════════════════════════════════════════════════════════════════╝`)
               } else if (isMA) {
                 report(`  This MA Lighting device is sending sACN but has no RDMnet/LLRP support.`)
@@ -1632,6 +1961,86 @@ class Scanner extends EventEmitter {
             report(`  ${src.ip} — ${src.universes.length} universe(s): ${unis} (${src.packetCount} packets)`)
           }
         }
+      }
+
+      // ── Late Gateway Sweep (polling) ──────────────────────────────────────────
+      // Pathports discover the embedded broker via mDNS and then initiate a TCP
+      // connection.  The initial gateway check (t≈12 s) is too early — Pathports
+      // typically connect at t=16-30 s from broker start.  This sweep polls for
+      // up to LATE_POLL_MS after the main scan completes, catching any gateways
+      // that connect during or shortly after Art-Net/sACN discovery.
+      if (scanArtNet && this.broker && this.broker.running && alive()) {
+        const LATE_POLL_MS   = 15_000   // poll window after main scan (ms)
+        const POLL_INTERVAL  = 500      // check every 500 ms
+        const processedIPs   = new Set(embeddedGateways.map(g => g.ip))
+        const lateStart      = Date.now()
+
+        // Log current broker state so it appears in test output
+        const allConnected = this.broker.getConnectedGateways()
+        console.log(`[Late sweep] broker has ${allConnected.length} connected gateway(s) at scan end — polling for up to ${LATE_POLL_MS / 1000}s for new connections`)
+
+        // Trigger immediate mDNS re-announce to break any Pathport backoff state.
+        // Pathports that received previous (conflicting) responses may have backed off
+        // from querying; an unsolicited announcement forces them to re-discover us.
+        if (this.broker._announceAll) this.broker._announceAll()
+        // Also schedule re-announces every 5s during the polling window
+        let _reannounceCount = 0
+        const _reannounceHandle = setInterval(() => {
+          if (this.broker && this.broker.running && this.broker._announceAll) {
+            _reannounceCount++
+            console.log(`[Late sweep] re-announcing (${_reannounceCount})`)
+            this.broker._announceAll()
+          }
+        }, 5000)
+
+        while (alive() && Date.now() - lateStart < LATE_POLL_MS) {
+          const newGateways = this.broker.getConnectedGateways()
+            .filter(gw => !processedIPs.has(gw.ip))
+
+          if (newGateways.length > 0) {
+            console.log(`[Late sweep] ${newGateways.length} new gateway(s) connected at t+${Math.round((Date.now() - lateStart) / 100) / 10}s`)
+          }
+
+          for (const gw of newGateways) {
+            if (!alive()) break
+            processedIPs.add(gw.ip)  // mark as handled before awaiting RPT
+
+            report(`Late gateway discovery: ${gw.ip} (UID: ${gw.uid}) connected — scanning for RDM devices…`)
+
+            const gwNode = {
+              ip:          gw.ip,
+              shortName:   `RDMnet GW @ ${gw.ip}`,
+              longName:    `RDMnet Gateway  UID:${gw.uid}`,
+              protocol:    'rdmnet',
+              supportsRDM: true,
+              cid:         gw.cidHex,
+              uid:         gw.uid,
+            }
+            if (!this.nodes.has(gw.ip)) {
+              this.nodes.set(gw.ip, gwNode)
+              this.emit('nodeFound', gwNode)
+            }
+
+            // E1.37-7 endpoint enumeration with legacy binary-tree fallback
+            const gwDevices = await this._scanRPTGateway(gw, gwNode, report, alive, 'RDMnet RPT (late connection)')
+            allDevices.push(...gwDevices)
+
+            if (gwDevices.length === 0) {
+              report(`  [RPT] No RDM devices found on late-connected gateway ${gw.ip}.`)
+            }
+
+            // Found at least one device — no need to continue scanning
+            if (allDevices.length > 0) break
+          }
+
+          // Stop polling once we have devices or scan was stopped
+          if (allDevices.length > 0 || !alive()) break
+
+          await new Promise(r => setTimeout(r, POLL_INTERVAL))
+        }
+        clearInterval(_reannounceHandle)
+
+        console.log(`[Late sweep] done — found ${allDevices.length} device(s) total`)
       }
 
       // (LLRP broadcast probes already sent at start of scan — see above)

@@ -23,9 +23,14 @@ contextBridge.exposeInMainWorld('rdm', {
   removeManualNode: (ip)        => ipcRenderer.invoke('remove-manual-node', ip),
 
   // ── Device Control ──────────────────────────────────────────────────────────
-  setDmxAddress:  (device, address) => ipcRenderer.invoke('set-dmx-address', device, address),
-  setDeviceLabel: (device, label)   => ipcRenderer.invoke('set-device-label', device, label),
-  identifyDevice: (device, on)      => ipcRenderer.invoke('identify-device', device, on),
+  setDmxAddress:        (device, address)     => ipcRenderer.invoke('set-dmx-address', device, address),
+  setDeviceLabel:       (device, label)       => ipcRenderer.invoke('set-device-label', device, label),
+  identifyDevice:       (device, on)          => ipcRenderer.invoke('identify-device', device, on),
+  setDevicePersonality: (device, personality) => ipcRenderer.invoke('set-device-personality', device, personality),
+
+  // ── Device Detail / Vitals (fixture panel) ──────────────────────────────────
+  getDeviceDetail:  (device)             => ipcRenderer.invoke('get-device-detail', device),
+  pollDeviceVitals: (device, sensorNums) => ipcRenderer.invoke('poll-device-vitals', device, sensorNums),
 
   // ── Updates ─────────────────────────────────────────────────────────────────
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),

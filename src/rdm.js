@@ -22,6 +22,11 @@ const PID = {
   DISC_UNIQUE_BRANCH:              0x0001,
   DISC_MUTE:                       0x0002,
   DISC_UN_MUTE:                    0x0003,
+  // Status collection (E1.20 §10.3)
+  QUEUED_MESSAGE:                  0x0020,
+  STATUS_MESSAGES:                 0x0030,
+  STATUS_ID_DESCRIPTION:           0x0031,
+  CLEAR_STATUS_ID:                 0x0032,
   // Device info
   SUPPORTED_PARAMETERS:            0x0050,
   DEVICE_INFO:                     0x0060,
@@ -45,6 +50,20 @@ const PID = {
   IDENTIFY_DEVICE:                 0x1000,
   RESET_DEVICE:                    0x1001,
   POWER_STATE:                     0x1010,
+  // E1.37-7 — RDMnet gateway endpoint management (values verified against
+  // ETCLabs/RDM rdm/defs.h).  Sent to a gateway's default responder (endpoint 0)
+  // to enumerate its endpoints and the RDM responders it discovered on them.
+  ENDPOINT_LIST:                   0x0900,
+  ENDPOINT_LIST_CHANGE:            0x0901,
+  IDENTIFY_ENDPOINT:               0x0902,
+  ENDPOINT_TO_UNIVERSE:            0x0903,
+  ENDPOINT_MODE:                   0x0904,
+  ENDPOINT_LABEL:                  0x0905,
+  RDM_TRAFFIC_ENABLE:              0x0906,
+  DISCOVERY_STATE:                 0x0907,
+  BACKGROUND_DISCOVERY:            0x0908,
+  ENDPOINT_RESPONDERS:             0x090B,
+  ENDPOINT_RESPONDER_LIST_CHANGE:  0x090C,
 }
 
 // ─── Product Categories ───────────────────────────────────────────────────────
@@ -152,6 +171,146 @@ function nackReasonString(pd) {
   if (!pd || pd.length < 2) return 'Unknown (no PD)'
   const code = pd.readUInt16BE(0)
   return NACK_REASON[code] || `Unknown (0x${code.toString(16).padStart(4, '0')})`
+}
+
+// ─── Sensor / Status / Lamp decode tables (E1.20 Appendix A) ──────────────────
+
+// Table A-12 — sensor types (common subset; unknown values shown as hex)
+const SENSOR_TYPE = {
+  0x00: 'Temperature', 0x01: 'Voltage', 0x02: 'Current', 0x03: 'Frequency',
+  0x04: 'Resistance', 0x05: 'Power', 0x06: 'Mass', 0x07: 'Length', 0x08: 'Area',
+  0x09: 'Volume', 0x0A: 'Density', 0x0B: 'Velocity', 0x0C: 'Acceleration',
+  0x0D: 'Force', 0x0E: 'Energy', 0x0F: 'Pressure', 0x10: 'Time', 0x11: 'Angle',
+  0x12: 'Position X', 0x13: 'Position Y', 0x14: 'Position Z',
+  0x15: 'Angular Velocity', 0x16: 'Luminous Intensity', 0x17: 'Luminous Flux',
+  0x18: 'Illuminance', 0x19: 'Chrominance Red', 0x1A: 'Chrominance Green',
+  0x1B: 'Chrominance Blue', 0x1C: 'Contacts', 0x1D: 'Memory', 0x1E: 'Items',
+  0x1F: 'Humidity', 0x20: 'Counter 16-bit', 0x7F: 'Other',
+}
+
+// Table A-13 — sensor units (symbols)
+const SENSOR_UNIT = {
+  0x00: '', 0x01: '°C', 0x02: 'V DC', 0x03: 'V AC pk', 0x04: 'V AC RMS',
+  0x05: 'A DC', 0x06: 'A AC pk', 0x07: 'A AC RMS', 0x08: 'Hz', 0x09: 'Ω',
+  0x0A: 'W', 0x0B: 'kg', 0x0C: 'm', 0x0D: 'm²', 0x0E: 'm³', 0x0F: 'kg/m³',
+  0x10: 'm/s', 0x11: 'm/s²', 0x12: 'N', 0x13: 'J', 0x14: 'Pa', 0x15: 's',
+  0x16: '°', 0x17: 'sr', 0x18: 'cd', 0x19: 'lm', 0x1A: 'lx', 0x1B: 'IRE', 0x1C: 'B',
+}
+
+// Table A-14 — unit prefix → multiplier
+const SENSOR_PREFIX_MULT = {
+  0x00: 1, 0x01: 1e-1, 0x02: 1e-2, 0x03: 1e-3, 0x04: 1e-6, 0x05: 1e-9,
+  0x06: 1e-12, 0x07: 1e-15, 0x08: 1e-18, 0x09: 1e-21, 0x0A: 1e-24,
+  0x11: 10, 0x12: 100, 0x13: 1e3, 0x14: 1e6, 0x15: 1e9, 0x16: 1e12,
+  0x17: 1e15, 0x18: 1e18, 0x19: 1e21, 0x1A: 1e24,
+}
+
+// Lamp states (E1.20 Table A-8)
+const LAMP_STATE_NAME = {
+  0x00: 'Off', 0x01: 'On', 0x02: 'Striking', 0x03: 'Standby',
+  0x04: 'Not Present', 0x05: 'Error', 0x7F: 'No Lamp',
+}
+
+// Status types (E1.20 Table A-4)
+const STATUS_TYPE_NAME = {
+  0x00: 'None', 0x01: 'Get Last', 0x02: 'Advisory', 0x03: 'Warning', 0x04: 'Error',
+  0x12: 'Advisory (cleared)', 0x13: 'Warning (cleared)', 0x14: 'Error (cleared)',
+}
+
+// Standard status message IDs (E1.20 Table B-5, subset).  %d1/%d2 are the
+// two data values carried with the message.
+const STATUS_MESSAGE_TEXT = {
+  0x0001: 'Calibration failed (slot %d1)',
+  0x0002: 'Sensor %d1 not found',
+  0x0003: 'Sensor %d1 always on',
+  0x0011: 'Lamp doused',
+  0x0012: 'Lamp failed to strike',
+  0x0021: 'Over-temperature: %d1 °C (sensor %d2)',
+  0x0022: 'Under-temperature: %d1 °C (sensor %d2)',
+  0x0023: 'Sensor %d1 out of range',
+  0x0031: 'Over-voltage: %d1 V (phase %d2)',
+  0x0032: 'Under-voltage: %d1 V (phase %d2)',
+  0x0033: 'Over-current: %d1 A (phase %d2)',
+  0x0034: 'Under-current: %d1 A (phase %d2)',
+  0x0035: 'Phase %d1: %d2°',
+  0x0036: 'Phase %d1 error',
+  0x0037: 'Current: %d1 A',
+  0x0038: 'Voltage: %d1 V',
+  0x0041: 'No dimmer response',
+  0x0042: 'Load failure',
+  0x0043: 'Breaker tripped',
+  0x0044: 'Watts: %d1 W',
+  0x0045: 'Dimmer failure',
+  0x0046: 'Dimmer panic mode',
+  0x0050: 'Ready',
+  0x0051: 'Not ready',
+  0x0052: 'Low fluid',
+}
+
+/**
+ * Format a status message into human-readable text.
+ * Manufacturer-specific IDs (>= 0x8000) are shown as hex with raw data values.
+ */
+function statusMessageText(msgId, d1, d2) {
+  const tpl = STATUS_MESSAGE_TEXT[msgId]
+  if (tpl) return tpl.replace('%d1', String(d1)).replace('%d2', String(d2))
+  return `Mfr status 0x${msgId.toString(16).toUpperCase().padStart(4, '0')} (data ${d1}, ${d2})`
+}
+
+/**
+ * Parse a SENSOR_DEFINITION response PD (E1.20 §10.7.1).
+ */
+function parseSensorDefinition(pd) {
+  if (!pd || pd.length < 13) return null
+  return {
+    num:        pd[0],
+    type:       pd[1],
+    typeName:   SENSOR_TYPE[pd[1]] || `0x${pd[1].toString(16)}`,
+    unit:       SENSOR_UNIT[pd[2]] !== undefined ? SENSOR_UNIT[pd[2]] : '',
+    prefixMult: SENSOR_PREFIX_MULT[pd[3]] !== undefined ? SENSOR_PREFIX_MULT[pd[3]] : 1,
+    rangeMin:   pd.readInt16BE(4),
+    rangeMax:   pd.readInt16BE(6),
+    normalMin:  pd.readInt16BE(8),
+    normalMax:  pd.readInt16BE(10),
+    recorded:   pd[12],              // bit 0: recorded value support, bit 1: lowest/highest
+    description: pd.length > 13 ? pd.slice(13).toString('ascii').replace(/\0.*$/, '').trim() : '',
+  }
+}
+
+/**
+ * Parse a SENSOR_VALUE response PD (E1.20 §10.7.2).
+ */
+function parseSensorValue(pd) {
+  if (!pd || pd.length < 9) return null
+  return {
+    num:      pd[0],
+    present:  pd.readInt16BE(1),
+    lowest:   pd.readInt16BE(3),
+    highest:  pd.readInt16BE(5),
+    recorded: pd.readInt16BE(7),
+  }
+}
+
+/**
+ * Parse a STATUS_MESSAGES response PD (E1.20 §10.3.1) — N × 9-byte entries.
+ */
+function parseStatusMessages(pd) {
+  const out = []
+  if (!pd) return out
+  for (let off = 0; off + 9 <= pd.length; off += 9) {
+    const subDevice = pd.readUInt16BE(off)
+    const type      = pd[off + 2]
+    const msgId     = pd.readUInt16BE(off + 3)
+    const d1        = pd.readInt16BE(off + 5)
+    const d2        = pd.readInt16BE(off + 7)
+    out.push({
+      subDevice, type,
+      typeName: STATUS_TYPE_NAME[type] || `0x${type.toString(16)}`,
+      msgId, d1, d2,
+      text: statusMessageText(msgId, d1, d2),
+    })
+  }
+  return out
 }
 
 // ─── Response Type Helpers ────────────────────────────────────────────────────
@@ -347,10 +506,12 @@ function parseDeviceInfo(pd) {
 
 module.exports = {
   CC, PID, PRODUCT_CATEGORY, NACK_REASON, RESPONSE_TYPE,
+  SENSOR_TYPE, SENSOR_UNIT, LAMP_STATE_NAME, STATUS_TYPE_NAME,
   SOURCE_UID, BROADCAST_UID, ALL_DEVICES,
   buildPacket, buildDiscUniqueBranch, buildDiscMute, buildDiscUnMuteAll,
   buildGetRequest, buildSetRequest,
   parsePacket, parseDiscoveryResponse, parseDeviceInfo,
+  parseSensorDefinition, parseSensorValue, parseStatusMessages, statusMessageText,
   nackReasonString,
   uidToString, stringToUID,
   checksum, nextTN,

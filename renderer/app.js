@@ -16,6 +16,7 @@ const State = {
   isDemo:       false,
   protocol:     'both', // 'artnet', 'sacn', or 'both'
   hidePassive:  false,  // hide passive ArtDmx sources (media servers / consoles)
+  nodeFilter:   null,   // when set (node IP), device grid shows only that node's fixtures
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
@@ -74,6 +75,16 @@ window.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('applyLabelBtn').addEventListener('click', () => App.applyDeviceLabel())
   document.getElementById('identifyOnBtn').addEventListener('click', () => App.identifyOn())
   document.getElementById('identifyOffBtn').addEventListener('click', () => App.identifyOff())
+  document.getElementById('applyPersonalityBtn').addEventListener('click', () => App.applyPersonality())
+
+  // Fixture cards are (re)rendered via innerHTML, which cannot carry element
+  // listeners — a single delegated listener on the grid works for every card,
+  // no matter how it was rendered.  (Per-card listeners silently died in
+  // serialization since the grid was first written — clicking never worked.)
+  document.getElementById('deviceGrid').addEventListener('click', (e) => {
+    const card = e.target.closest('.device-card')
+    if (card && card.dataset.uid) App.openModal(card.dataset.uid)
+  })
 
   // Update banner
   document.getElementById('updateDismiss').addEventListener('click', () => {
@@ -182,6 +193,13 @@ const App = {
     renderManualNodes(nodes)
   },
 
+  // Click a sidebar node → show only its fixtures; click again to clear.
+  toggleNodeFilter(ip) {
+    State.nodeFilter = State.nodeFilter === ip ? null : ip
+    rerenderNodeList()
+    App.applyFilter()
+  },
+
   loadDemo() {
     clearAll()
     State.isDemo = true
@@ -199,15 +217,22 @@ const App = {
         d.manufacturerLabel, d.deviceModelDescription,
         d.deviceLabel, d.uid, String(d.dmxStartAddress)
       ].join(' ').toLowerCase()
-      const matchQ   = !query    || haystack.includes(query)
-      const matchCat = !category || d.productCategoryName === category
-      return matchQ && matchCat
+      const matchQ    = !query    || haystack.includes(query)
+      const matchCat  = !category || d.productCategoryName === category
+      const matchNode = !State.nodeFilter || d.nodeIP === State.nodeFilter
+      return matchQ && matchCat && matchNode
     })
 
+    const byAddr = (a, b) => (a.dmxStartAddress || 0) - (b.dmxStartAddress || 0)
     State.filtered.sort((a, b) => {
-      if (sortBy === 'address')      return (a.dmxStartAddress || 0) - (b.dmxStartAddress || 0)
-      if (sortBy === 'label')        return (a.deviceLabel || '').localeCompare(b.deviceLabel || '')
-      if (sortBy === 'manufacturer') return (a.manufacturerLabel || '').localeCompare(b.manufacturerLabel || '')
+      if (sortBy === 'address')      return byAddr(a, b)
+      if (sortBy === 'type')         return (a.productCategoryName || '').localeCompare(b.productCategoryName || '') || byAddr(a, b)
+      if (sortBy === 'model')        return (a.deviceModelDescription || '').localeCompare(b.deviceModelDescription || '') || byAddr(a, b)
+      if (sortBy === 'label')        return (a.deviceLabel || '').localeCompare(b.deviceLabel || '') || byAddr(a, b)
+      if (sortBy === 'manufacturer') return (a.manufacturerLabel || '').localeCompare(b.manufacturerLabel || '') || byAddr(a, b)
+      if (sortBy === 'node')         return (a.nodeIP || '').localeCompare(b.nodeIP || '', undefined, { numeric: true })
+                                         || String(a.universe || '').localeCompare(String(b.universe || ''), undefined, { numeric: true })
+                                         || byAddr(a, b)
       if (sortBy === 'uid')          return a.uid.localeCompare(b.uid)
       return 0
     })
@@ -222,12 +247,36 @@ const App = {
     State.activeDevice = device
     populateModal(device)
     document.getElementById('modal').style.display = 'flex'
+    startDeviceDetail(device)
   },
 
   closeModal() {
+    stopVitalsPoll()
     document.getElementById('modal').style.display = 'none'
     State.activeDevice = null
     hideFeedback()
+  },
+
+  async applyPersonality() {
+    const device = State.activeDevice
+    if (!device) return
+    const val = parseInt(document.getElementById('editPersonality').value, 10)
+    if (!val) return
+    if (State.isDemo) {
+      device.currentPersonality = val
+      showFeedback(`Personality set to ${val}`, true)
+      return
+    }
+    const res = await window.rdm.setDevicePersonality(device, val)
+    if (res?.ok) {
+      device.currentPersonality = val
+      const p = (device._detail?.personalities || []).find(x => x.n === val)
+      if (p) { device.personalityName = p.name; device.dmxFootprint = p.footprint }
+      showFeedback(`Personality set to ${val}${p ? ' — ' + p.name : ''}`, true)
+      updateCard(device)
+    } else {
+      showFeedback(res?.error || 'Failed to set personality', false)
+    }
   },
 
   // ── Actions ────────────────────────────────────────────────────────────────
@@ -273,12 +322,18 @@ const App = {
     }
   },
 
+  _setIdentifyUI(on) {
+    document.getElementById('identifyOnBtn').classList.toggle('identify-active', on === true)
+    document.getElementById('identifyOffBtn').classList.toggle('identify-active', on === false)
+  },
+
   async identifyOn() {
     const device = State.activeDevice
     if (!device) return
     if (State.isDemo) { showFeedback('Identify ON (demo mode)', true); return }
     const res = await window.rdm.identifyDevice(device, true)
-    res?.ok ? showFeedback('Identify ON', true) : showFeedback('Failed to send identify', false)
+    if (res?.ok) { device._identify = true; App._setIdentifyUI(true); showFeedback('Identify ON', true) }
+    else showFeedback(res?.error || 'Failed to send identify', false)
   },
 
   async identifyOff() {
@@ -286,7 +341,8 @@ const App = {
     if (!device) return
     if (State.isDemo) { showFeedback('Identify OFF (demo mode)', true); return }
     const res = await window.rdm.identifyDevice(device, false)
-    res?.ok ? showFeedback('Identify OFF', true) : showFeedback('Failed to send identify', false)
+    if (res?.ok) { device._identify = false; App._setIdentifyUI(false); showFeedback('Identify OFF', true) }
+    else showFeedback(res?.error || 'Failed to send identify', false)
   },
 
   // Copy all log entries to the system clipboard
@@ -406,7 +462,9 @@ function setStatus(text, type) {
 // An ArtPollReply ('artnet') carries name, universes, RDM flags, etc.
 // A passive ArtDmx sniff ('artnet-passive') only has IP + universe numbers.
 // We never replace a higher-quality entry with a lower-quality one.
-const PROTO_RANK = { artnet: 3, sacn: 3, 'artnet-passive': 1 }
+// rdmnet ranks highest: a live RDMnet broker connection is confirmed RDM-capable,
+// richer than anything learned from ArtPollReply/sACN packets for the same IP.
+const PROTO_RANK = { rdmnet: 4, artnet: 3, sacn: 3, 'artnet-passive': 1 }
 
 function addNode(node) {
   // Manual placeholder entries (protocol: null, manual: true) are deferred
@@ -466,15 +524,20 @@ function buildNodeLi(node) {
   }
 
   const li = document.createElement('li')
-  li.className = `node-item node-real${node.stale ? ' node-stale' : ''}`
+  const selected = State.nodeFilter === node.ip
+  li.className = `node-item node-real node-clickable${node.stale ? ' node-stale' : ''}${selected ? ' node-selected' : ''}`
+  li.title = selected ? 'Showing only this node\u2019s fixtures — click to show all'
+                      : 'Click to show only this node\u2019s fixtures'
   li.innerHTML = `
     <div class="node-name">${escHtml(node.shortName)}</div>
     <div class="node-ip">${escHtml(node.ip)}</div>
     <div class="node-proto-row">
       <span class="node-proto-badge proto-badge-${protoClass}">${escHtml(proto)}</span>
       ${node.stale ? '<div class="node-rdm node-checking-tag">checking…</div>' : rdmTag}
+      ${selected ? '<div class="node-filter-tag">filtering</div>' : ''}
     </div>
   `
+  li.addEventListener('click', () => App.toggleNodeFilter(node.ip))
   return li
 }
 
@@ -498,7 +561,20 @@ function rerenderNodeList() {
 
 // ─── Devices ─────────────────────────────────────────────────────────────────
 function addDevice(device) {
-  if (State.devices.find(d => d.uid === device.uid)) return
+  const idx = State.devices.findIndex(d => d.uid === device.uid)
+  if (idx >= 0) {
+    // Same device re-emitted with richer data (post-scan label backfill) —
+    // merge non-empty fields and refresh its card in place.
+    const merged = { ...State.devices[idx] }
+    for (const [k, v] of Object.entries(device)) {
+      if (v !== null && v !== undefined && v !== '') merged[k] = v
+    }
+    State.devices[idx] = merged
+    updateCard(merged)
+    updateCategoryFilter()
+    App.applyFilter()
+    return
+  }
   State.devices.push(device)
   updateCategoryFilter()
   App.applyFilter()
@@ -563,7 +639,7 @@ function buildCard(device) {
   const card = document.createElement('div')
   card.id        = `card-${device.uid.replace(':', '-')}`
   card.className = `device-card ${catClass}`
-  card.addEventListener('click', () => App.openModal(device.uid))
+  card.dataset.uid = device.uid   // click handled by grid-level delegation (survives innerHTML re-renders)
   card.innerHTML = `
     <div class="card-top-row">
       <div class="card-manufacturer">${escHtml(mfr)}</div>
@@ -635,8 +711,141 @@ function populateModal(device) {
 
   document.getElementById('editAddress').value = device.dmxStartAddress || ''
   document.getElementById('editLabel').value   = device.deviceLabel || ''
+  App._setIdentifyUI(device._identify === true ? true : false)
 
   hideFeedback()
+}
+
+// ─── Fixture Detail: vitals + status polling ─────────────────────────────────
+//
+// When the fixture modal opens we fetch static detail once (personality list,
+// sensor definitions), then poll sensor values / vitals / status messages every
+// few seconds while the modal stays open.  A token guards against stale async
+// updates after the modal is closed or another fixture is opened.
+
+let _vitalsTimer = null
+let _vitalsToken = 0
+
+function stopVitalsPoll() {
+  _vitalsToken++
+  if (_vitalsTimer) { clearTimeout(_vitalsTimer); _vitalsTimer = null }
+}
+
+async function startDeviceDetail(device) {
+  stopVitalsPoll()
+  const token = _vitalsToken
+
+  document.getElementById('vitalsChips').innerHTML     = '<span class="vitals-loading">Reading device…</span>'
+  document.getElementById('sensorTableWrap').innerHTML = ''
+  document.getElementById('statusMsgWrap').innerHTML   = ''
+  document.getElementById('personalityGroup').style.display = 'none'
+
+  if (State.isDemo) {
+    renderVitals(device,
+      { personalities: [{ n:1, footprint:28, name:'Standard' }, { n:2, footprint:40, name:'Extended' }],
+        sensors: [{ num:0, typeName:'Temperature', unit:'°C', prefixMult:1, description:'Base Temp', rangeMin:-10, rangeMax:90, normalMin:0, normalMax:70 }] },
+      { sensors: [{ num:0, present:42, lowest:21, highest:58, recorded:0 }],
+        vitals: { deviceHours: 1234, lampState: 'On', powerCycles: 87, dmxStartAddress: device.dmxStartAddress },
+        statusMessages: [] })
+    populatePersonalitySelect(device, [{ n:1, footprint:28, name:'Standard' }, { n:2, footprint:40, name:'Extended' }])
+    return
+  }
+
+  // One-time static detail (cached per device object)
+  if (!device._detail) {
+    const res = await window.rdm.getDeviceDetail(device)
+    if (token !== _vitalsToken) return
+    device._detail = res?.ok ? res.detail : { personalities: [], sensors: [] }
+  }
+  populatePersonalitySelect(device, device._detail.personalities)
+
+  const pollOnce = async () => {
+    if (token !== _vitalsToken) return
+    if (State.scanning) {                     // don't interleave with an active scan
+      _vitalsTimer = setTimeout(pollOnce, 3000)
+      return
+    }
+    const sensorNums = (device._detail.sensors || []).map(sd => sd.num)
+    const res = await window.rdm.pollDeviceVitals(device, sensorNums)
+    if (token !== _vitalsToken) return
+    if (res?.ok) renderVitals(device, device._detail, res.vitals)
+    else document.getElementById('vitalsChips').innerHTML =
+      `<span class="vitals-loading">No response — device may be offline (${escHtml(res?.error || 'timeout')})</span>`
+    _vitalsTimer = setTimeout(pollOnce, 4000)
+  }
+  pollOnce()
+}
+
+function populatePersonalitySelect(device, personalities) {
+  if (!personalities || personalities.length === 0) return
+  const sel = document.getElementById('editPersonality')
+  sel.innerHTML = personalities.map(p =>
+    `<option value="${p.n}" ${p.n === device.currentPersonality ? 'selected' : ''}>` +
+    `${p.n} — ${escHtml(p.name || 'Mode ' + p.n)} (${p.footprint} ch)</option>`
+  ).join('')
+  document.getElementById('personalityGroup').style.display = ''
+}
+
+function _fmtSensorVal(raw, def) {
+  if (raw == null) return '—'
+  const v = raw * (def?.prefixMult ?? 1)
+  const rounded = Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 10) / 10
+  return `${rounded}${def?.unit ? ' ' + def.unit : ''}`
+}
+
+function renderVitals(device, detail, data) {
+  // ── Vitals chips ──
+  const v = data.vitals || {}
+  const chips = []
+  const chip = (label, val, cls = '') => {
+    if (val == null || val === '') return
+    chips.push(`<div class="vital-chip ${cls}"><span class="vital-label">${escHtml(label)}</span><span class="vital-value">${escHtml(String(val))}</span></div>`)
+  }
+  chip('Device Hours', v.deviceHours != null ? v.deviceHours.toLocaleString() : null)
+  chip('Lamp Hours',   v.lampHours   != null ? v.lampHours.toLocaleString()   : null)
+  chip('Lamp State',   v.lampState, v.lampState === 'Error' ? 'chip-err' : '')
+  chip('Lamp Strikes', v.lampStrikes != null ? v.lampStrikes.toLocaleString() : null)
+  chip('Power Cycles', v.powerCycles != null ? v.powerCycles.toLocaleString() : null)
+  chip('DMX Address',  v.dmxStartAddress)
+  document.getElementById('vitalsChips').innerHTML =
+    chips.length ? chips.join('') : '<span class="vitals-loading">This fixture reports no vitals</span>'
+
+  // Live-update the address in device state if it changed externally
+  if (v.dmxStartAddress != null && v.dmxStartAddress !== device.dmxStartAddress) {
+    device.dmxStartAddress = v.dmxStartAddress
+    updateCard(device)
+  }
+
+  // ── Sensors table ──
+  const defs = new Map((detail.sensors || []).map(d => [d.num, d]))
+  const rows = (data.sensors || []).map(sv => {
+    const def = defs.get(sv.num) || {}
+    const outOfNormal = def.normalMax !== undefined && def.normalMax !== def.normalMin &&
+                        (sv.present > def.normalMax || sv.present < def.normalMin)
+    return `<tr class="${outOfNormal ? 'sensor-alert' : ''}">
+      <td>${escHtml(def.description || def.typeName || ('Sensor ' + sv.num))}</td>
+      <td class="sensor-val">${_fmtSensorVal(sv.present, def)}</td>
+      <td>${_fmtSensorVal(sv.lowest, def)} / ${_fmtSensorVal(sv.highest, def)}</td>
+      <td>${def.normalMin !== undefined ? _fmtSensorVal(def.normalMin, def) + ' – ' + _fmtSensorVal(def.normalMax, def) : '—'}</td>
+    </tr>`
+  }).join('')
+  document.getElementById('sensorTableWrap').innerHTML = rows
+    ? `<table class="sensor-table">
+         <thead><tr><th>Sensor</th><th>Now</th><th>Low / High</th><th>Normal Range</th></tr></thead>
+         <tbody>${rows}</tbody></table>`
+    : ''
+
+  // ── Status / error messages ──
+  const msgs = data.statusMessages || []
+  const badge = (t) => t.includes('Error') ? 'st-err' : t.includes('Warning') ? 'st-warn' : 'st-adv'
+  document.getElementById('statusMsgWrap').innerHTML = msgs.length
+    ? `<div class="status-list">` + msgs.map(m =>
+        `<div class="status-msg ${badge(m.typeName)}">
+           <span class="status-badge">${escHtml(m.typeName)}</span>
+           <span class="status-text">${escHtml(m.text)}</span>
+           ${m.subDevice ? `<span class="status-sub">sub-device ${m.subDevice}</span>` : ''}
+         </div>`).join('') + `</div>`
+    : `<div class="status-clear">✓ No active status or error messages</div>`
 }
 
 // ─── Feedback ────────────────────────────────────────────────────────────────
@@ -652,12 +861,14 @@ function hideFeedback() {
 }
 
 // ─── Log ─────────────────────────────────────────────────────────────────────
+const LOG_MAX_ENTRIES = 600   // keep the DOM bounded during long sessions
 function log(msg, type = '') {
   const box  = document.getElementById('logBox')
   const line = document.createElement('div')
   line.className   = `log-entry ${type ? 'log-' + type : ''}`
   line.textContent = msg
   box.appendChild(line)
+  while (box.childElementCount > LOG_MAX_ENTRIES) box.removeChild(box.firstChild)
   box.scrollTop = box.scrollHeight
 }
 
@@ -668,6 +879,7 @@ function log(msg, type = '') {
 // will un-stale any it rediscovers.  Nodes not found by scan end are pruned
 // in scanFinished().  Everything else (devices, log, filter) is reset fresh.
 function clearForScan() {
+  State.nodeFilter = null
   // Mark every known node as stale — it will be un-staled when nodeFound fires for it
   State.nodes.forEach(n => { n.stale = true })
   rerenderNodeList()
@@ -689,6 +901,7 @@ function clearForScan() {
 }
 
 function clearAll() {
+  State.nodeFilter = null
   State.devices  = []
   State.nodes    = []
   State.filtered = []

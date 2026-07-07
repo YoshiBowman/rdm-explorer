@@ -106,8 +106,11 @@
             <label class="filter-label">Sort by</label>
             <select id="sortSelect" class="filter-select">
               <option value="address">DMX Address</option>
-              <option value="label">Label</option>
+              <option value="type">Fixture Type</option>
+              <option value="model">Model</option>
               <option value="manufacturer">Manufacturer</option>
+              <option value="label">Label</option>
+              <option value="node">Node / Universe</option>
               <option value="uid">UID</option>
             </select>
           </div>
@@ -187,6 +190,14 @@
             </div>
           </div>
 
+          <div class="setting-group" id="personalityGroup" style="display:none">
+            <label class="setting-label">DMX Personality (Mode)</label>
+            <div class="setting-row">
+              <select id="editPersonality" class="setting-input"></select>
+              <button class="btn btn-sm btn-primary" id="applyPersonalityBtn">Apply</button>
+            </div>
+          </div>
+
           <div class="setting-group">
             <label class="setting-label">Identify</label>
             <div class="setting-row identify-row">
@@ -197,6 +208,17 @@
 
           <div id="setFeedback" class="set-feedback" style="display:none"></div>
         </div>
+      </div>
+
+      <!-- Live vitals + status codes (polls while modal is open) -->
+      <div class="modal-vitals">
+        <h4 class="modal-col-heading">
+          Vitals &amp; Status
+          <span id="vitalsPollDot" class="poll-dot" title="Live — refreshing"></span>
+        </h4>
+        <div id="vitalsChips" class="vitals-chips"></div>
+        <div id="sensorTableWrap"></div>
+        <div id="statusMsgWrap"></div>
       </div>
 
       <div class="modal-footer">

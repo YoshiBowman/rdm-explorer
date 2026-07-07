@@ -835,3 +835,75 @@ body.has-update .layout { padding-top: calc(var(--topbar-h) + 32px); }
   animation: spin 1s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── Fixture Vitals & Status (Session 45) ─────────────────────────────────── */
+.modal-vitals {
+  padding: 14px 24px 6px;
+  border-top: 1px solid var(--border, #2a2d35);
+}
+.poll-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: #35c46f; margin-left: 8px; vertical-align: middle;
+  animation: pollPulse 2s ease-in-out infinite;
+}
+@keyframes pollPulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+
+.vitals-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
+.vital-chip {
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--bg-inset, #16181d); border: 1px solid var(--border, #2a2d35);
+  border-radius: 8px; padding: 6px 12px; min-width: 90px;
+}
+.vital-chip.chip-err { border-color: #e5484d; }
+.vital-label { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; opacity: .55; }
+.vital-value { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.vitals-loading { opacity: .55; font-size: 13px; }
+
+.sensor-table { width: 100%; border-collapse: collapse; margin: 4px 0 12px; font-size: 13px; }
+.sensor-table th {
+  text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  opacity: .55; padding: 4px 10px; border-bottom: 1px solid var(--border, #2a2d35);
+}
+.sensor-table td { padding: 5px 10px; border-bottom: 1px solid rgba(255,255,255,.04); }
+.sensor-table .sensor-val { font-weight: 600; font-variant-numeric: tabular-nums; }
+.sensor-table tr.sensor-alert td { color: #ffb224; }
+.sensor-table tr.sensor-alert .sensor-val { color: #e5484d; }
+
+.status-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.status-msg {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 12px; border-radius: 7px; font-size: 13px;
+  background: var(--bg-inset, #16181d); border: 1px solid var(--border, #2a2d35);
+}
+.status-badge {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+  padding: 2px 8px; border-radius: 20px; flex-shrink: 0;
+}
+.status-msg.st-err  { border-color: rgba(229,72,77,.55); }
+.status-msg.st-err  .status-badge { background: rgba(229,72,77,.18);  color: #ff6369; }
+.status-msg.st-warn { border-color: rgba(255,178,36,.45); }
+.status-msg.st-warn .status-badge { background: rgba(255,178,36,.15); color: #ffb224; }
+.status-msg.st-adv  .status-badge { background: rgba(110,120,140,.2); color: #9aa4b2; }
+.status-sub { margin-left: auto; font-size: 11px; opacity: .5; }
+.status-clear { color: #35c46f; font-size: 13px; padding: 4px 0 12px; }
+
+/* ─── Node filtering + identify toggle (v1.0.0) ────────────────────────────── */
+.node-item.node-clickable { cursor: pointer; }
+.node-item.node-clickable:hover { border-color: var(--border-h, #3a3f4b); }
+.node-item.node-selected {
+  border-color: #4f8cff;
+  box-shadow: 0 0 0 1px rgba(79,140,255,.35);
+  background: rgba(79,140,255,.06);
+}
+.node-filter-tag {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+  color: #4f8cff; background: rgba(79,140,255,.14);
+  padding: 1px 7px; border-radius: 20px;
+}
+
+.identify-row .btn { opacity: .6; transition: opacity .15s, box-shadow .15s; }
+.identify-row .btn.identify-active {
+  opacity: 1;
+  box-shadow: 0 0 0 2px rgba(255,178,36,.55);
+}
+#identifyOffBtn.identify-active { box-shadow: 0 0 0 2px rgba(154,164,178,.55); }

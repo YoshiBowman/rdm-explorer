@@ -1,5 +1,8 @@
 node_modules/
 dist/
+logs/
 *.log
 .DS_Store
-node_modules/
+nohup.out
+.claude/
+RDMnetBroker.pkg
