@@ -55,21 +55,24 @@ jobs:
         run: |
           if [ -n "$CSC_LINK" ] && [ -n "$APPLE_TEAM_ID" ]; then
             echo "🔐 Signing + notarizing with Developer ID $APPLE_TEAM_ID"
-            npx electron-builder --mac --x64 --arm64 \
+            npx electron-builder --mac --x64 --arm64 --publish never \
               -c.mac.notarize.teamId="$APPLE_TEAM_ID"
           else
             echo "⚠ No signing secrets set — building UNSIGNED"
-            CSC_IDENTITY_AUTO_DISCOVERY=false \
-              npx electron-builder --mac --x64 --arm64
+            # Clear the empty cert env vars so electron-builder doesn't try to
+            # load an empty CSC_LINK path (which fails with "not a file").
+            unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+            npx electron-builder --mac --x64 --arm64 --publish never
           fi
 
       - name: Build (Windows)
         if: matrix.platform == 'win'
-        run: npm run build:win
+        run: npm run build:win -- --publish never
 
       - name: Build (Linux)
         if: matrix.platform == 'linux'
-        run: npm run build:linux
+        run: npm run build:linux -- --publish never
 
       # ── Upload each platform's installers as workflow artifacts ───────────────
       - name: Upload artifact (macOS)
