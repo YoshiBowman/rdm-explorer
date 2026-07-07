@@ -44,6 +44,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.rdm.onScanDone(    (data)   => scanFinished(data))
   window.rdm.onError(       (data)   => { log('Error: ' + data.message, 'err'); scanFinished(null, true) })
   window.rdm.onUpdateAvailable((info) => showUpdateBanner(info))
+  window.rdm.onUpdateProgress((p)    => updateBannerProgress(p))
+  window.rdm.onUpdateDownloaded((info)=> showUpdateReady(info))
 
   // ── Wire up UI event listeners ───────────────────────────────────────────
   document.getElementById('scanBtn').addEventListener('click', () => App.startScan())
@@ -139,10 +141,43 @@ async function loadInterfaces() {
 
 // ─── Update Banner ──────────────────────────────────────────────────────────
 function showUpdateBanner(info) {
-  document.getElementById('updateText').textContent = `RDM Explorer v${info.version} is available!`
   const link = document.getElementById('updateLink')
-  link.href = info.url
-  link.textContent = 'Download'
+  if (info.downloading) {
+    // Packaged build: electron-updater is fetching it in the background
+    document.getElementById('updateText').textContent = `Downloading RDM Explorer v${info.version}…`
+    link.style.display = 'none'
+  } else {
+    // Dev / fallback: link out to the releases page
+    document.getElementById('updateText').textContent = `RDM Explorer v${info.version} is available!`
+    link.href = info.url || '#'
+    link.textContent = 'Download'
+    link.onclick = null
+    link.removeAttribute('target')
+    link.style.display = ''
+    if (info.url) link.setAttribute('target', '_blank')
+  }
+  document.getElementById('updateBanner').style.display = 'flex'
+  document.body.classList.add('has-update')
+}
+
+function updateBannerProgress(p) {
+  const el = document.getElementById('updateText')
+  if (el) el.textContent = `Downloading update… ${p.percent}%`
+}
+
+// electron-updater finished downloading — offer a one-click restart
+function showUpdateReady(info) {
+  document.getElementById('updateText').textContent = `RDM Explorer v${info.version} is ready to install.`
+  const link = document.getElementById('updateLink')
+  link.style.display = ''
+  link.textContent = 'Restart & Update'
+  link.href = '#'
+  link.removeAttribute('target')
+  link.onclick = (e) => {
+    e.preventDefault()
+    link.textContent = 'Restarting…'
+    window.rdm.installUpdate()
+  }
   document.getElementById('updateBanner').style.display = 'flex'
   document.body.classList.add('has-update')
 }

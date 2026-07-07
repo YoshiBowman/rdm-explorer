@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld('rdm', {
 
   // ── Updates ─────────────────────────────────────────────────────────────────
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  installUpdate:   () => ipcRenderer.invoke('install-update'),
 
   // ── Logs ─────────────────────────────────────────────────────────────────
   openLogsFolder: ()     => ipcRenderer.invoke('open-logs-folder'),
@@ -47,10 +48,13 @@ contextBridge.exposeInMainWorld('rdm', {
   onScanDone:       (cb) => ipcRenderer.on('scan-done',         (_, d) => cb(d)),
   onError:          (cb) => ipcRenderer.on('scan-error',        (_, d) => cb(d)),
   onUpdateAvailable:(cb) => ipcRenderer.on('update-available',  (_, d) => cb(d)),
+  onUpdateProgress: (cb) => ipcRenderer.on('update-progress',   (_, d) => cb(d)),
+  onUpdateDownloaded:(cb)=> ipcRenderer.on('update-downloaded', (_, d) => cb(d)),
 
   // ── Cleanup ─────────────────────────────────────────────────────────────────
   removeAllListeners: () => {
-    ['scan-progress', 'node-found', 'device-found', 'scan-done', 'scan-error', 'update-available']
+    ['scan-progress', 'node-found', 'device-found', 'scan-done', 'scan-error',
+     'update-available', 'update-progress', 'update-downloaded']
       .forEach(ch => ipcRenderer.removeAllListeners(ch))
   }
 })

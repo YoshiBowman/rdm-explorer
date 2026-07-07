@@ -14,6 +14,7 @@ function draw() {
   const c = document.createElement('canvas')
   c.width = S; c.height = S
   const x = c.getContext('2d')
+  const TAU = Math.PI * 2
 
   // Rounded-square background (macOS superellipse-ish corner radius)
   const r = 232
@@ -28,28 +29,43 @@ function draw() {
   x.fill()
 
   const cx = 512, cy = 512
+  const white = '#ffffff'
 
-  // Connector shell — white ring
-  x.strokeStyle = '#ffffff'
+  // ── XLR / DMX connector ──
+  const outerR = 322   // barrel outer edge
+  const collarR = 250  // inner pin-collar edge
+
+  // Barrel (outer shell)
+  x.strokeStyle = white
   x.lineWidth = 30
-  x.beginPath()
-  x.arc(cx, cy, 300, 0, Math.PI * 2)
-  x.stroke()
+  x.beginPath(); x.arc(cx, cy, outerR, 0, TAU); x.stroke()
 
-  // Five pins in the classic 5-pin XLR layout: 2 top, 1 centre, 2 bottom
-  const off = 118, dropTop = -112, dropBot = 128, pin = 44
+  // Keyway notch — the flat tab at the bottom that makes an XLR an XLR.
+  // Drawn as a rounded bar bridging the gap just below the pin collar.
+  x.fillStyle = white
+  const keyW = 150, keyH = 46, keyY = cy + collarR - 6
+  x.beginPath()
+  if (x.roundRect) x.roundRect(cx - keyW / 2, keyY, keyW, keyH, 22)
+  else x.rect(cx - keyW / 2, keyY, keyW, keyH)
+  x.fill()
+
+  // Pin collar (inner ring the pins sit in)
+  x.lineWidth = 16
+  x.beginPath(); x.arc(cx, cy, collarR, 0, TAU); x.stroke()
+
+  // Five pins in the classic 5-pin XLR layout: 2 upper, 1 centre, 2 lower,
+  // sitting above the keyway.
+  const off = 116, up = -104, down = 96, pin = 46
   const pins = [
-    [cx - off, cy + dropTop],
-    [cx + off, cy + dropTop],
-    [cx,       cy + 8],
-    [cx - off, cy + dropBot],
-    [cx + off, cy + dropBot],
+    [cx - off, cy + up],
+    [cx + off, cy + up],
+    [cx,       cy - 6],
+    [cx - off, cy + down],
+    [cx + off, cy + down],
   ]
-  x.fillStyle = '#ffffff'
+  x.fillStyle = white
   for (const [px, py] of pins) {
-    x.beginPath()
-    x.arc(px, py, pin, 0, Math.PI * 2)
-    x.fill()
+    x.beginPath(); x.arc(px, py, pin, 0, TAU); x.fill()
   }
 
   return c.toDataURL('image/png')

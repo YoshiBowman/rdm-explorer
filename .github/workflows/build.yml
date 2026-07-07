@@ -6,14 +6,18 @@ on:
       - 'v*'           # Triggers on any tag like v0.1.0, v1.2.3
   workflow_dispatch:   # Allows manual trigger from the GitHub Actions tab
 
+# electron-builder publishes installers + the latest*.yml auto-update metadata to
+# a draft GitHub Release for the tag. Needs write access to contents.
+permissions:
+  contents: write
+
 jobs:
-  # ── Build on all three platforms in parallel ────────────────────────────────
   build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14        # Apple Silicon runner; builds both arm64 + x64 dmg
+          - os: macos-14        # Apple Silicon runner; builds both arm64 + x64
             platform: mac
           - os: windows-latest
             platform: win
@@ -35,15 +39,24 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # Publish mode: on a version tag, electron-builder uploads to the GitHub
+      # release (installers + latest*.yml + blockmaps for auto-update). On a
+      # manual workflow_dispatch (no tag) it just builds, so nothing is published.
+      - name: Set publish flag
+        id: pub
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "flag=always" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=never" >> "$GITHUB_OUTPUT"
+          fi
+
       # ── macOS ────────────────────────────────────────────────────────────────
       # Signs + notarizes when the signing secrets are configured; otherwise
-      # falls back to an unsigned build so the workflow always produces artifacts.
-      #   Required secrets for signed builds:
-      #     MAC_CERT_P12_BASE64          Developer ID Application cert (.p12) base64-encoded
-      #     MAC_CERT_PASSWORD            password used when exporting that .p12
-      #     APPLE_ID                     your Apple ID email
-      #     APPLE_APP_SPECIFIC_PASSWORD  app-specific password from appleid.apple.com
-      #     APPLE_TEAM_ID                10-character Apple Developer Team ID
+      # builds unsigned. Required secrets for signed builds:
+      #   MAC_CERT_P12_BASE64  MAC_CERT_PASSWORD  APPLE_ID
+      #   APPLE_APP_SPECIFIC_PASSWORD  APPLE_TEAM_ID
       - name: Build (macOS)
         if: matrix.platform == 'mac'
         env:
@@ -52,94 +65,27 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -n "$CSC_LINK" ] && [ -n "$APPLE_TEAM_ID" ]; then
             echo "🔐 Signing + notarizing with Developer ID $APPLE_TEAM_ID"
-            npx electron-builder --mac --x64 --arm64 --publish never \
+            npx electron-builder --mac --x64 --arm64 --publish ${{ steps.pub.outputs.flag }} \
               -c.mac.notarize.teamId="$APPLE_TEAM_ID"
           else
             echo "⚠ No signing secrets set — building UNSIGNED"
-            # Clear the empty cert env vars so electron-builder doesn't try to
-            # load an empty CSC_LINK path (which fails with "not a file").
             unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
             export CSC_IDENTITY_AUTO_DISCOVERY=false
-            npx electron-builder --mac --x64 --arm64 --publish never
+            npx electron-builder --mac --x64 --arm64 --publish ${{ steps.pub.outputs.flag }}
           fi
 
       - name: Build (Windows)
         if: matrix.platform == 'win'
-        run: npm run build:win -- --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --publish ${{ steps.pub.outputs.flag }}
 
       - name: Build (Linux)
         if: matrix.platform == 'linux'
-        run: npm run build:linux -- --publish never
-
-      # ── Upload each platform's installers as workflow artifacts ───────────────
-      - name: Upload artifact (macOS)
-        if: matrix.platform == 'mac'
-        uses: actions/upload-artifact@v4
-        with:
-          name: mac-build
-          path: dist/*.dmg
-          if-no-files-found: error
-
-      - name: Upload artifact (Windows)
-        if: matrix.platform == 'win'
-        uses: actions/upload-artifact@v4
-        with:
-          name: win-build
-          path: dist/*.exe
-          if-no-files-found: error
-
-      - name: Upload artifact (Linux)
-        if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-build
-          path: dist/*.AppImage
-          if-no-files-found: error
-
-  # ── Collect installers and attach them to a GitHub Release ──────────────────
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')   # only on a version tag
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Flatten + checksum
-        run: |
-          mkdir -p out
-          find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.AppImage' \) -exec cp {} out/ \;
-          cd out && shasum -a 256 * > SHA256SUMS.txt
-          ls -la
-
-      - name: Create / update GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: RDM Explorer ${{ github.ref_name }}
-          body: |
-            ## RDM Explorer ${{ github.ref_name }}
-
-            Signed & notarized macOS builds, plus Windows and Linux installers.
-
-            | File | Platform |
-            |------|----------|
-            | `*-arm64.dmg` | macOS — Apple Silicon |
-            | `*.dmg` | macOS — Intel |
-            | `*.exe` | Windows |
-            | `*.AppImage` | Linux — x86_64 |
-            | `SHA256SUMS.txt` | Checksums |
-
-            _Edit these notes before publishing._
-          files: out/*
-          draft: true    # opens as a draft to review before publishing
-          fail_on_unmatched_files: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --linux --publish ${{ steps.pub.outputs.flag }}

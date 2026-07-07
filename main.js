@@ -10,6 +10,7 @@ const { app, BrowserWindow, ipcMain, shell } = require('electron')
 const path  = require('path')
 const os    = require('os')
 const https = require('https')
+const { autoUpdater } = require('electron-updater')
 const Scanner    = require('./src/scanner')
 const ScanLogger = require('./src/logger')
 
@@ -42,8 +43,10 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show()
-    // Check for updates a few seconds after launch
-    setTimeout(checkForUpdates, 4000)
+    // Check for updates a few seconds after launch.
+    // Packaged builds use electron-updater (can download + install in place);
+    // running from source falls back to the lightweight GitHub API check.
+    setTimeout(() => { app.isPackaged ? checkForUpdatesAuto() : checkForUpdates() }, 4000)
   })
 
   mainWindow.on('closed', () => {
@@ -332,7 +335,52 @@ ipcMain.handle('read-latest-log', () => {
 const GITHUB_OWNER = 'YoshiBowman'
 const GITHUB_REPO  = 'rdm-explorer'
 
-ipcMain.handle('check-for-updates', () => checkForUpdates())
+// ── electron-updater (packaged builds) ────────────────────────────────────────
+// Downloads the update in the background and installs it on quit/restart.
+// Reads the publish config baked in at build time (GitHub releases), so it needs
+// the release to carry electron-builder's latest*.yml metadata (the CI publishes it).
+let _updateDownloaded = false
+
+autoUpdater.autoDownload = true
+autoUpdater.autoInstallOnAppQuit = true
+autoUpdater.on('update-available', (info) => {
+  send('update-available', { version: info.version, notes: releaseNotesToText(info.releaseNotes), downloading: true })
+})
+autoUpdater.on('download-progress', (p) => {
+  send('update-progress', { percent: Math.round(p.percent) })
+})
+autoUpdater.on('update-downloaded', (info) => {
+  _updateDownloaded = true
+  send('update-downloaded', { version: info.version })
+})
+autoUpdater.on('error', (err) => {
+  // Non-fatal: log and let the UI stay quiet. A failed auto-check should never
+  // interrupt the user; they can still download manually from the releases page.
+  console.error('[autoUpdater]', err && err.message ? err.message : err)
+})
+
+function checkForUpdatesAuto() {
+  try { autoUpdater.checkForUpdates() } catch (e) { console.error('[autoUpdater] check failed', e.message) }
+}
+
+// electron-updater releaseNotes can be a string or an array of {version,note}
+function releaseNotesToText(notes) {
+  if (!notes) return ''
+  if (typeof notes === 'string') return notes
+  if (Array.isArray(notes)) return notes.map(n => n.note || '').join('\n\n')
+  return ''
+}
+
+// Renderer asks to restart & install the downloaded update
+ipcMain.handle('install-update', () => {
+  if (_updateDownloaded) {
+    setImmediate(() => autoUpdater.quitAndInstall())
+    return { ok: true }
+  }
+  return { ok: false, error: 'No update downloaded yet' }
+})
+
+ipcMain.handle('check-for-updates', () => (app.isPackaged ? checkForUpdatesAuto() : checkForUpdates()))
 
 function checkForUpdates() {
   const options = {
