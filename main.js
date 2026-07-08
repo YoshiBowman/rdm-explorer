@@ -15,7 +15,15 @@ const Scanner    = require('./src/scanner')
 const ScanLogger = require('./src/logger')
 
 const PKG     = require('./package.json')
-const LOGS_DIR = path.join(__dirname, 'logs')
+
+// Scan logs directory.
+// Packaged builds MUST NOT use __dirname — it points inside the read-only
+// app.asar bundle, and mkdir there throws ENOTDIR, killing every scan before it
+// starts. Use the per-user data dir instead (~/Library/Application Support/…).
+// Dev keeps ./logs in the project folder for convenience.
+const LOGS_DIR = app.isPackaged
+  ? path.join(app.getPath('userData'), 'logs')
+  : path.join(__dirname, 'logs')
 
 let mainWindow  = null
 let scanner     = null
@@ -177,7 +185,9 @@ ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0', protocol = 
   }
 
   // ── Start scan logger ────────────────────────────────────────────────────
-  const logger = new ScanLogger(LOGS_DIR, {
+  // Logging is auxiliary: if it can't start (permissions, disk, path), warn and
+  // scan anyway with a no-op logger — a log failure must never block scanning.
+  let logger = new ScanLogger(LOGS_DIR, {
     appVersion:     PKG.version,
     bindAddress,
     protocol,
@@ -185,7 +195,15 @@ ipcMain.handle('start-scan', async (_event, bindAddress = '0.0.0.0', protocol = 
     subnetOverride,
     manualNodes,
   })
-  logger.open()
+  try {
+    logger.open()
+  } catch (e) {
+    console.error('[logger] failed to open scan log:', e.message)
+    const noop = () => {}
+    logger = { nodeFound: noop, deviceFound: noop, progress: noop, error: noop,
+               close: noop, filePath: null }
+    send('scan-progress', { message: `⚠ Scan log disabled (${e.message}) — scanning continues` })
+  }
 
   scanner = new Scanner()
 

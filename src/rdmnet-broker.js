@@ -1141,6 +1141,19 @@ class RDMnetBroker extends EventEmitter {
   async start() {
     if (this.running) return
 
+    // macOS: sweep orphaned `dns-sd -P RDM-Explorer` registrations left behind by
+    // previous instances that were killed hard (crash, force-quit). A stale
+    // registration keeps advertising our service name with a dead port through
+    // mDNSResponder, poisoning Pathport discovery with conflicting answers.
+    // Matching on our service name means we can only ever kill our own helpers.
+    if (process.platform === 'darwin') {
+      try {
+        const { execFileSync } = require('child_process')
+        execFileSync('pkill', ['-f', 'dns-sd -P RDM-Explorer'], { stdio: 'ignore' })
+        this._log('[RDMnet Broker] Cleared stale dns-sd registrations from a previous run')
+      } catch (_) { /* pkill exits 1 when nothing matched — the normal case */ }
+    }
+
     await this._startTCPServer()
     this._startMDNS()
     this._startKeepalive()
