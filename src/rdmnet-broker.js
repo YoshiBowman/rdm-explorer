@@ -196,6 +196,32 @@ function uidStr(uid) {
   return `${uid.slice(0,2).toString('hex').toUpperCase()}:${uid.slice(2,6).toString('hex').toUpperCase()}`
 }
 
+/**
+ * Load the persisted broker identity (CID + UID), creating and saving a new one
+ * on first run. Stored in the per-user application data directory so packaged
+ * and dev runs on the same machine share one identity.
+ */
+function loadOrCreateBrokerIdentity() {
+  const fs = require('fs')
+  const path = require('path')
+  const dir = process.platform === 'darwin'
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'rdm-explorer')
+    : path.join(os.homedir(), '.rdm-explorer')
+  const file = path.join(dir, 'broker-identity.json')
+  try {
+    const j = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const cid = Buffer.from(j.cid, 'hex')
+    const uid = Buffer.from(j.uid, 'hex')
+    if (cid.length === 16 && uid.length === 6) return { cid, uid }
+  } catch (_) { /* first run or unreadable — create below */ }
+  const ident = { cid: makeCID(), uid: makeUID() }
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(file, JSON.stringify({ cid: ident.cid.toString('hex'), uid: ident.uid.toString('hex') }))
+  } catch (_) { /* persistence is best-effort; a volatile identity still works */ }
+  return ident
+}
+
 // ─── Packet Builders ──────────────────────────────────────────────────────────
 
 /**
@@ -1083,8 +1109,15 @@ function parseMDNSResponseForRDMnet(msg) {
 class RDMnetBroker extends EventEmitter {
   constructor() {
     super()
-    this.cid      = makeCID()
-    this.uid      = makeUID()
+    // Broker identity (CID + UID) is PERSISTED across app restarts.
+    // E1.33 clients (Pathport firmware) cache the advertised broker identity in
+    // their mDNS cache for up to 75 minutes. If a restarted broker shows up at
+    // the same name/host/port with a DIFFERENT CID, the firmware wedges in a
+    // browse-but-never-reconnect state until power-cycled. With a stable
+    // identity, a restart looks like a brief TCP blip and they reconnect.
+    const ident   = loadOrCreateBrokerIdentity()
+    this.cid      = ident.cid
+    this.uid      = ident.uid
     this.server   = null
     this.mdnsSock   = null   // kept for compat — unused after per-iface refactor
     this._mdnsSocks = []     // [ { ip, sock } ] — one socket per local interface
@@ -1189,6 +1222,26 @@ class RDMnetBroker extends EventEmitter {
     for (const [, p] of this._pending) { clearTimeout(p.timer); p.resolve(null) }
     this._pending.clear()
     this.running = false
+  }
+
+  /**
+   * Return IPs that queried the broker via mDNS in the last few minutes but are
+   * not currently TCP-connected — the "browse-but-won't-connect" wedge signature.
+   */
+  getStuckQueriers(windowMs = 5 * 60 * 1000) {
+    const connected = new Set()
+    for (const [sock, client] of this._clients) {
+      if (client.connected && sock.remoteAddress) {
+        connected.add(sock.remoteAddress.replace('::ffff:', ''))
+      }
+    }
+    const now = Date.now()
+    const stuck = []
+    for (const [ip, q] of this._mdnsQueriers) {
+      const recent = q.lastSeen ? (now - q.lastSeen) < windowMs : true
+      if (!connected.has(ip) && recent) stuck.push(ip)
+    }
+    return stuck
   }
 
   /**
@@ -1979,6 +2032,7 @@ class RDMnetBroker extends EventEmitter {
             if (!querierIP.startsWith('127.') && querierIP !== ip && onSameSubnet) {
               const q = this._mdnsQueriers.get(querierIP) || { firstSeen: Date.now(), queryCount: 0, warned: false }
               q.queryCount++
+              q.lastSeen = Date.now()
               this._mdnsQueriers.set(querierIP, q)
               // After first query from a device with no TCP connection, wait 3s then warn.
               // The 3s window gives the device time to complete the TCP handshake before we

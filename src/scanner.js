@@ -1295,9 +1295,17 @@ class Scanner extends EventEmitter {
         } else if (mDNSIPs.length > 0) {
           report(`Embedded RDMnet broker running (port 5569) — no gateways connected.`)
           report(`  mDNS advertising on: ${mDNSIPs.join(', ')}`)
-          report(`  If Pathports are configured for E1.33 RDMnet (Unsecured) but still not connecting:`)
-          report(`  • macOS firewall may be blocking port 5569 — check System Settings → Privacy &`)
-          report(`    Security → Firewall → ensure RDM Explorer (or Electron) is set to Allow`)
+          const stuck = this.broker.getStuckQueriers ? this.broker.getStuckQueriers() : []
+          if (stuck.length > 0) {
+            report(`  ⚠ ${stuck.length} RDMnet device(s) are LOOKING for the broker but not connecting:`)
+            report(`    ${stuck.join(', ')}`)
+            report(`  This is a known gateway firmware state after the app restarts.`)
+            report(`  Fix: power-cycle the device(s) above once, then re-scan.`)
+          } else {
+            report(`  If Pathports are configured for E1.33 RDMnet (Unsecured) but still not connecting:`)
+            report(`  • macOS firewall may be blocking port 5569 — check System Settings → Privacy &`)
+            report(`    Security → Firewall → ensure RDM Explorer (or Electron) is set to Allow`)
+          }
         } else {
           report(`Embedded RDMnet broker running (port 5569) — mDNS not yet started, wait and re-scan.`)
         }
