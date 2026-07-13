@@ -1328,20 +1328,35 @@ class RDMnetBroker extends EventEmitter {
 
   // ─── TCP Server ─────────────────────────────────────────────────────────────
 
-  _startTCPServer() {
+  _startTCPServer(attempt = 1) {
+    // EADDRINUSE retry: when the app restarts, the OLD instance can still hold
+    // port 5569 for a few seconds while it shuts down. Without retries the new
+    // broker silently loses the race and the app runs with NO broker until the
+    // next relaunch (observed in Session 46). Retry for up to ~20 s.
+    const MAX_ATTEMPTS = 13
+    const RETRY_MS     = 1500
     return new Promise((resolve, reject) => {
       this.server = net.createServer((socket) => this._handleConnection(socket))
 
       this.server.on('error', (err) => {
         if (!this.running) {
           // Startup failure
-          reject(err)
+          if (err && err.code === 'EADDRINUSE' && attempt < MAX_ATTEMPTS) {
+            this._log(`[RDMnet Broker] Port ${RDMNET_PORT} busy (old instance still closing?) — retry ${attempt}/${MAX_ATTEMPTS - 1} in ${RETRY_MS} ms`)
+            try { this.server.close() } catch (_) {}
+            setTimeout(() => {
+              this._startTCPServer(attempt + 1).then(resolve, reject)
+            }, RETRY_MS)
+          } else {
+            reject(err)
+          }
         } else if (this.listenerCount('error') > 0) {
           this.emit('error', err)
         }
       })
 
       this.server.listen(RDMNET_PORT, '0.0.0.0', () => {
+        if (attempt > 1) this._log(`[RDMnet Broker] Port ${RDMNET_PORT} acquired on retry ${attempt}`)
         this._log(`[RDMnet Broker] TCP server listening on 0.0.0.0:${RDMNET_PORT}`)
         resolve()
       })
